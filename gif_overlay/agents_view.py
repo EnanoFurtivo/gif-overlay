@@ -78,6 +78,7 @@ class AgentsView:
         self.app = app             # the gif_overlay.app module: cfg, monitor_geometry()...
         self.tracker = AgentTracker()
         self.save_src = None
+        self.win_w = 0
         self.load_state()          # sessions seen before a restart, timers and all
         self.levels = {}           # level -> GIF path (level 1 = Claude sessions)
         self.gifs = {}             # path -> Gif, loaded on first use
@@ -96,7 +97,10 @@ class AgentsView:
         GtkLayerShell.set_namespace(self.win, "gif-overlay-agents")
         GtkLayerShell.set_layer(self.win, GtkLayerShell.Layer.OVERLAY)
         GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
-        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.LEFT, True)
+        # top-right: the column is mirrored (hugs the right edge, bubbles open to the left)
+        self.mirror = app.cfg["agents_corner"] == "top-right"
+        self.side_edge = GtkLayerShell.Edge.RIGHT if self.mirror else GtkLayerShell.Edge.LEFT
+        GtkLayerShell.set_anchor(self.win, self.side_edge, True)
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
         if app.visual:
             self.win.set_visual(app.visual)
@@ -249,7 +253,11 @@ class AgentsView:
         # everything is drawn EDGE in, so glows fit; timer badges overhang tile corners
         side = max([p.x + p.w + BADGE_SIDE_W for p in self.placements
                     if p.kind == "sprite" and p.h < SMALL_TILE] + [0])
-        w, h = max(w + BADGE_OVERHANG, side) + 2 * EDGE, h + 2 * EDGE + BADGE_OVERHANG
+        content_w = max(w + BADGE_OVERHANG, side)
+        if self.mirror:  # flip positions (not the pictures): x measured from the right
+            self.placements = [p._replace(x=content_w - p.x - p.w) for p in self.placements]
+        w, h = content_w + 2 * EDGE, h + 2 * EDGE + BADGE_OVERHANG
+        self.win_w = w
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         if not self.win.get_visible():
@@ -261,7 +269,7 @@ class AgentsView:
                 GtkLayerShell.set_monitor(self.win, mon)
             m = self.app.cfg["margin"]
             GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, m)
-            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.LEFT, m)
+            GtkLayerShell.set_margin(self.win, self.side_edge, m)
             self.win.show_all()
         region = cairo.Region()
         for p in self.placements:
@@ -283,11 +291,12 @@ class AgentsView:
         boxes = [p for p in self.placements if p.kind != "bubble"]
         if not boxes:
             return []
-        mx, my, _, _ = self.app.monitor_geometry()
+        mx, my, mw, _ = self.app.monitor_geometry()
         m = self.app.cfg["margin"]
-        w = max(p.x + p.w for p in boxes)
+        left = mx + mw - m - self.win_w if self.mirror else mx + m  # the window's left edge
+        x0, x1 = min(p.x for p in boxes), max(p.x + p.w for p in boxes)
         h = max(p.y + p.h for p in boxes)
-        return [f"agents:{mx + m + EDGE},{my + m + EDGE},{w},{h}"]
+        return [f"agents:{left + EDGE + x0},{my + m + EDGE},{x1 - x0},{h}"]
 
     def hover(self, _name, on):
         self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
@@ -306,10 +315,14 @@ class AgentsView:
             if parent.index < 0:  # a session: start under its name tag
                 top = max(q.y + q.h for q in self.placements[:i]
                           if q.kind == "caption" and q.session_id == p.session_id)
-            trunk, mid = parent.x + INDENT // 2, p.y + p.h / 2
+            mid = p.y + p.h / 2
+            if self.mirror:  # trunk near the parent's right side, elbow into the child's right
+                trunk, child_edge = parent.x + parent.w - INDENT // 2, p.x + p.w + 2
+            else:
+                trunk, child_edge = parent.x + INDENT // 2, p.x - 2
             cr.move_to(trunk, top + 2)
             cr.line_to(trunk, mid)
-            cr.line_to(p.x - 2, mid)
+            cr.line_to(child_edge, mid)
         neon_stroke(cr)
         cr.pop_group_to_source()
         cr.paint_with_alpha(self.fade.value)
@@ -338,10 +351,11 @@ class AgentsView:
             "Sans Bold 7" if p.depth == 0 else "Sans Bold 6"))
         tw, th = layout.get_pixel_size()
         bw, bh = tw + 8, th + 2
-        if p.h < SMALL_TILE:  # beside small tiles, so it doesn't cover them
-            x, y = p.x + p.w + 4, p.y + (p.h - bh) / 2
-        else:                  # on the corner of bigger ones
-            x, y = p.x + p.w - bw + BADGE_OVERHANG, p.y + p.h - bh + BADGE_OVERHANG // 2
+        if p.h < SMALL_TILE:  # beside small tiles (on the open side), so it doesn't cover them
+            x, y = (p.x - 4 - bw if self.mirror else p.x + p.w + 4), p.y + (p.h - bh) / 2
+        else:                  # on the bottom corner of bigger ones
+            x = p.x - BADGE_OVERHANG if self.mirror else p.x + p.w - bw + BADGE_OVERHANG
+            y = p.y + p.h - bh + BADGE_OVERHANG // 2
         pill(cr, x, y, bw, bh)
         cr.set_source_rgba(0.043, 0.055, 0.078, a)
         cr.fill_preserve()
@@ -423,13 +437,15 @@ class AgentsView:
                 PangoCairo.show_layout(cr, layout)
             elif p.kind == "bubble":
                 header, speech = self.bubbles[p.session_id]
-                x0, y0 = p.x + EDGE + TAIL_H, p.y + EDGE
+                x0 = p.x + EDGE + (0 if self.mirror else TAIL_H)  # tail side faces the sprite
+                y0 = p.y + EDGE
                 bw, bh = p.w - TAIL_H - 2 * EDGE, p.h - 2 * EDGE
                 session_sprite = next(q for q in self.placements
                                       if q.kind == "sprite" and q.session_id == p.session_id
                                       and q.index == -1)
                 tail_y = min(max(session_sprite.y + session_sprite.h / 2, y0 + 16), y0 + bh - 16)
-                paint_bubble(cr, x0, y0, bw, bh, ("left", tail_y), header, speech, True)
+                paint_bubble(cr, x0, y0, bw, bh, ("right" if self.mirror else "left", tail_y),
+                             header, speech, True)
         return True
 
     def on_click(self, _w, event):

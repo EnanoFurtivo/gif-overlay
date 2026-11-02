@@ -17,7 +17,7 @@ Clippy style.
   audio dips to 30% while it plays so you actually hear it.
 - **Water reminder**: every 15 minutes the GIF tells you to drink water; it stays until you
   click it and skips while the screen is locked.
-- **Claude agent sprites** (top-left): one sprite per Claude Code session that is working
+- **Claude agent sprites** (top-right): one sprite per Claude Code session that is working
   or waiting for you, with its subagents stacked below it, smaller per level. When a
   session needs you it says so in a bubble; click it to jump to that chat in the Claude
   desktop app.
@@ -84,6 +84,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--pixel` / `--no-pixel` | off | nearest-neighbour scaling for pixel art |
 | `--bubbles` / `--no-bubbles` | on | notifications as speech bubbles, or keep Plasma's popups |
 | `--agents` / `--no-agents` | on | Claude agent sprites in the top-left corner |
+| `--agents-corner` | top-right | `top-right` or `top-left` |
 | `--agent-size` | 54 | height of a session's sprite (px) |
 | `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |
 | `--sound` | `~/.local/share/gif-overlay/sounds/notification.wav` | played with every bubble (`none` = silent) |
