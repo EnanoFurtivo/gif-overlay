@@ -81,7 +81,9 @@ class AgentsView:
         self.chats = {}            # Claude Code session id -> (desktop local id, title)
         self.chats_read_at = 0.0
         self.placements, self.bubbles, self.captions, self.started = [], {}, {}, {}
-        self.fade = Tween(1.0, lambda _v: self.area.queue_draw(), duration=0.2)
+        self.fade = Tween(1.0, self.invalidate, duration=0.2)
+        self.layers = None         # (size, under, over) cached drawing; GIF frames go between
+        self.frame_pending = False
         self.warned = False
         self.shown_key = None
 
@@ -128,7 +130,7 @@ class AgentsView:
         if self.placements and self.rows_key() != self.shown_key:
             self.refresh()
         elif self.placements:
-            self.area.queue_draw()  # the timer badges
+            self.invalidate()  # the timer badges
         return True
 
     def chat(self, sid):
@@ -155,9 +157,9 @@ class AgentsView:
     def gif(self, path):
         if path not in self.gifs:
             try:
-                self.gifs[path] = Gif(path, self.area.queue_draw)
+                self.gifs[path] = Gif(path, self.on_gif_frame)
             except GLib.Error:
-                self.gifs[path] = Gif(self.app.cfg["gif"], self.area.queue_draw)
+                self.gifs[path] = Gif(self.app.cfg["gif"], self.on_gif_frame)
         return self.gifs[path]
 
     def session_name(self, session):
@@ -234,7 +236,7 @@ class AgentsView:
             if p.kind == "bubble":  # only bubbles take clicks; sprites are click-through
                 region.union(cairo.RectangleInt(EDGE + p.x, EDGE + p.y, p.w, p.h))
         self.win.get_window().input_shape_combine_region(region, 0, 0)
-        self.area.queue_draw()
+        self.invalidate()
 
     def hide(self):
         self.placements = []
@@ -281,7 +283,7 @@ class AgentsView:
         cr.paint_with_alpha(self.fade.value)
 
     def draw_tile(self, cr, p):
-        """Dark glass rounded tile with the GIF inset in it."""
+        """Dark rounded tile with a neon border (the GIF is painted into it per frame)."""
         a, r = self.fade.value, min(10, p.h * 0.22)
         cr.new_sub_path()
         cr.arc(p.x + p.w - r, p.y + r, r, -math.pi / 2, 0)
@@ -292,11 +294,6 @@ class AgentsView:
         cr.set_source_rgba(0.043, 0.055, 0.078, a)
         cr.fill_preserve()
         neon_stroke(cr, a)
-        pad = max(2, round(p.h * 0.08))
-        surf = self.gif(self.path_for(p.depth)).surface(max(1, p.w - 2 * pad),
-                                                        max(1, p.h - 2 * pad))
-        cr.set_source_surface(surf, p.x + pad, p.y + pad)
-        cr.paint_with_alpha(a)
 
     def draw_badge(self, cr, p):
         """Neon pill on the tile's bottom-right corner: how long this agent has been around."""
@@ -321,12 +318,56 @@ class AgentsView:
         cr.move_to(x + 4, y + 1)
         PangoCairo.show_layout(cr, layout)
 
+    # -- drawing: the neon tiles, lines and text are drawn once into two cached layers;
+    # each GIF frame only paints the frames between them (glow passes are expensive)
+    def invalidate(self, *_):
+        self.layers = None
+        self.area.queue_draw()
+
+    def on_gif_frame(self):
+        if not self.frame_pending:  # at most ~30 redraws a second, however many GIFs tick
+            self.frame_pending = True
+            GLib.timeout_add(33, self.flush_frame)
+
+    def flush_frame(self):
+        self.frame_pending = False
+        self.area.queue_draw()
+        return False
+
     def draw(self, _w, cr):
+        size = (self.area.get_allocated_width(), self.area.get_allocated_height())
+        if self.layers is None or self.layers[0] != size:
+            self.layers = (size, self.render(size, self.draw_under), self.render(size, self.draw_over))
+        _size, under, over = self.layers
+        cr.set_source_surface(under, 0, 0)
+        cr.paint()
+        for p in self.placements:
+            if p.kind == "sprite":
+                pad = max(2, round(p.h * 0.08))
+                surf = self.gif(self.path_for(p.depth)).surface(max(1, p.w - 2 * pad),
+                                                                max(1, p.h - 2 * pad))
+                cr.set_source_surface(surf, EDGE + p.x + pad, EDGE + p.y + pad)
+                cr.paint_with_alpha(self.fade.value)
+        cr.set_source_surface(over, 0, 0)
+        cr.paint()
+        return True
+
+    def render(self, size, painter):
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, size[0]), max(1, size[1]))
+        cr = cairo.Context(surf)
         cr.translate(EDGE, EDGE)
+        painter(cr)
+        return surf
+
+    def draw_under(self, cr):
         self.draw_tree_lines(cr)
         for p in self.placements:
             if p.kind == "sprite":
                 self.draw_tile(cr, p)
+
+    def draw_over(self, cr):
+        for p in self.placements:
+            if p.kind == "sprite":
                 self.draw_badge(cr, p)
             elif p.kind == "caption":  # name tag: white text on a dark neon pill
                 a = self.fade.value
