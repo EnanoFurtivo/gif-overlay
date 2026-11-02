@@ -13,6 +13,25 @@ Clippy style.
 - **Sits on the taskbar**: it stays above the panel, and rides up and down with an
   auto-hide panel.
 - **Resizable / hideable** from global shortcuts; remembers its settings.
+- **Claude agent sprites** (top-left): one sprite per Claude Code session that is working
+  or waiting for you, with its subagents stacked below it, smaller per level. When a
+  session needs you it says so in a bubble; click it to jump to that chat in the Claude
+  desktop app.
+
+## Claude agent sprites
+
+```bash
+gif-overlay --install-hooks      # adds hooks to ~/.claude/settings.json (backup kept)
+gif-overlay --uninstall-hooks    # removes exactly those again
+```
+
+Sprites come from `~/gifs` (`--gifs-dir`): `level1.gif` for Claude sessions, `level2.gif`
+for their subagents, `level3.gif` for theirs, and so on. A level without its own file
+reuses the deepest one above it. Each session's sprite carries its chat name; hovering
+anywhere over the column fades it. New hooks apply to sessions started after installing.
+`--agent-size` sets the session sprite height (default 90), `--no-agents` turns it off.
+
+Agents started from a terminal show up too, but their bubble can't open a chat.
 
 ## Requirements
 
@@ -58,6 +77,9 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--monitor` | KWin picks | monitor index, or part of its make/model (e.g. `ASUS`); `-1` = let KWin pick |
 | `--pixel` / `--no-pixel` | off | nearest-neighbour scaling for pixel art |
 | `--bubbles` / `--no-bubbles` | on | notifications as speech bubbles, or keep Plasma's popups |
+| `--agents` / `--no-agents` | on | Claude agent sprites in the top-left corner |
+| `--agent-size` | 90 | height of a session's sprite (px) |
+| `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |
 
 Flags given on the command line are saved and become the new defaults.
 
