@@ -15,7 +15,7 @@ Clippy style.
 - **Resizable / hideable** from global shortcuts; remembers its settings.
 - **Sound + music ducking**: every bubble plays a sound of your choice, and other apps'
   audio dips to 30% while it plays so you actually hear it.
-- **Water reminder**: every 15 minutes the GIF tells you to drink water; it stays until you
+- **Water reminder**: every 20 minutes the GIF tells you to drink water; it stays until you
   click it and skips while the screen is locked.
 - **Claude agent sprites** (top-right): one sprite per Claude Code session that is working
   or waiting for you, with its subagents stacked below it, smaller per level. When a
@@ -89,7 +89,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |
 | `--sound` | `~/.local/share/gif-overlay/sounds/notification.wav` | played with every bubble (`none` = silent) |
 | `--duck` | 0.3 | other apps' volume while the sound plays (1 = don't dim) |
-| `--water-minutes` | 15 | water reminder interval (0 = off) |
+| `--water-minutes` | 20 | water reminder interval (0 = off) |
 
 Flags given on the command line are saved and become the new defaults.
 

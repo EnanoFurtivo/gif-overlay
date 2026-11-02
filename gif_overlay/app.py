@@ -24,7 +24,7 @@ PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
                 monitor=None, pixel=False, hidden=False, agents=True, agent_size=54,
                 gifs_dir="~/gifs", sound="~/.local/share/gif-overlay/sounds/notification.wav",
-                duck=0.3, water_minutes=15, agents_corner="top-right")
+                duck=0.3, water_minutes=20, agents_corner="top-right")
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
                                "settings.json")
 # GLib.unix_signal_add only supports HUP, INT, TERM, USR1, USR2 and WINCH

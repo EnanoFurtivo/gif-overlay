@@ -1,4 +1,4 @@
-"""Every few minutes the main GIF reminds you to drink some water (until you click it)."""
+"""Every 20 minutes (by default) the main GIF reminds you to drink some water (until you click it)."""
 import random, time
 
 from gif_overlay.gtkbits import Gio, GLib
