@@ -2,8 +2,8 @@
 import os, sys, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gif_overlay.agents import (AgentTracker, HOOK_MARKER, gif_for_level, layout, level_gifs,
-                                merge_hooks, remove_hooks)
+from gif_overlay.agents import (AgentTracker, HOOK_MARKER, format_elapsed, gif_for_level, layout,
+                                level_gifs, merge_hooks, remove_hooks)
 
 
 def ev(name, sid="s1", **kw):
@@ -144,6 +144,21 @@ def test_tree_order_puts_children_under_parents():
     assert t.tree(s) == [("a", 1), ("c", 2), ("d", 3), ("b", 1), ("e", 2)]
     t.event(ev("SubagentStop", agent_id="a"), 1)
     assert t.tree(s) == [("b", 1), ("e", 2), ("c", 2), ("d", 3)]
+
+
+# ---------------------------------------------------------------- timers
+def test_format_elapsed():
+    assert [format_elapsed(t) for t in (0, 59.9, 61, 3599, 3600, 3725)] == \
+        ["0:00", "0:59", "1:01", "59:59", "1:00:00", "1:02:05"]
+
+def test_subagent_start_times():
+    t = AgentTracker()
+    t.event(ev("UserPromptSubmit"), 5)
+    t.event(ev("SubagentStart", agent_id="a"), 10)
+    s = t.active(10)[0]
+    assert s.first_seen == 5 and s.agent_started == {"a": 10}
+    t.event(ev("SubagentStop", agent_id="a"), 20)
+    assert s.agent_started == {}
 
 
 # ---------------------------------------------------------------- level GIFs

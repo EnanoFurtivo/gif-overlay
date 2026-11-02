@@ -80,6 +80,7 @@ class SessionState:
     stopped_at: float | None = None
     agents: dict = field(default_factory=dict)   # running subagent id -> depth (1 = direct)
     parents: dict = field(default_factory=dict)  # running subagent id -> its spawner's id
+    agent_started: dict = field(default_factory=dict)  # running subagent id -> start time
     cwd: str = ""
 
 
@@ -123,9 +124,11 @@ class AgentTracker:
             parent = payload.get("parent_agent_id")
             s.agents[agent] = s.agents[parent] + 1 if parent in s.agents else 1
             s.parents[agent] = parent
+            s.agent_started[agent] = now
         elif name == "SubagentStop":
             s.agents.pop(agent, None)
             s.parents.pop(agent, None)
+            s.agent_started.pop(agent, None)
         elif name == "Notification":
             s.waiting = str(payload.get("message") or "needs your input")
         elif name == "PermissionRequest":
@@ -161,6 +164,13 @@ class AgentTracker:
 
     def any_waiting(self, now):
         return any(s.waiting for s in self.active(now))
+
+
+def format_elapsed(seconds):
+    """3:42, or 1:02:05 past an hour."""
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
 
 
 # ---------------------------------------------------------------- level GIFs

@@ -7,6 +7,7 @@ from gif_overlay.helpers import BubbleQueue, display_seconds
 
 MAX_W, MIN_W, PAD, RADIUS, TAIL_H = 340, 140, 14, 14, 16
 EDGE = 6  # room around a shape for its neon glow
+BUBBLE_GAP = 4  # between the main bubble's tail tip and the GIF
 FILL, TEXT, MUTED = "#0b0e14", "#e8fbff", "#5fe9f5"
 
 
@@ -99,7 +100,7 @@ class Bubble:
         self.typing_done = False
         self.hovered = False  # a fresh window: no leave event will come for the old one
         self.box = bubble_box(*self.layouts(), bool(note["app"]))
-        w, h = self.box[0] + 2 * self.EDGE, self.box[1] + self.TAIL_H + 2 * self.EDGE
+        w, h = self.box[0] + self.TAIL_H + 2 * self.EDGE, self.box[1] + 2 * self.EDGE
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         display = Gdk.Display.get_default()
@@ -119,11 +120,19 @@ class Bubble:
         self.last_tick = time.monotonic()
         self.step_src = GLib.timeout_add(16, self.type_tick)
 
+    def window_height(self):
+        return self.box[1] + 2 * EDGE
+
+    def window_bottom(self):
+        """Bottom margin that centres the bubble on the GIF (or sits on its baseline if taller)."""
+        return self.app.bottom_margin() + max(0, (self.app.size()[1] - self.window_height()) // 2)
+
     def place(self):
-        """Tail tip just above the GIF's head, right edges lined up."""
-        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT, self.app.cfg["margin"])
+        """To the GIF's left, tail pointing right at it."""
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT,
+                                 self.app.cfg["margin"] + self.app.size()[0] + BUBBLE_GAP)
         GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.BOTTOM,
-                                 self.app.bottom_margin() + int(self.app.size()[1] * 0.85) + int(self.rise.value))
+                                 self.window_bottom() + int(self.rise.value))
 
     def type_tick(self):
         now = time.monotonic()
@@ -194,9 +203,10 @@ class Bubble:
         if not self.note:
             return True
         bw, bh = self.box
-        # tail points at the middle of the GIF (the bubble's right edge is the GIF's)
-        tx = EDGE + bw - min(max(self.app.size()[0] * 0.5, 24), bw - 24)
-        paint_bubble(cr, EDGE, EDGE, bw, bh, ("down", tx), *self.layouts(self.typed),
+        # tail at the GIF's middle height, measured from the window's bottom edge
+        gif_mid = self.app.bottom_margin() + self.app.size()[1] / 2 - self.window_bottom()
+        ty = min(max(self.window_height() - gif_mid, EDGE + 18), EDGE + bh - 18)
+        paint_bubble(cr, EDGE, EDGE, bw, bh, ("right", ty), *self.layouts(self.typed),
                      bool(self.note["app"]))
         return True
 
@@ -234,11 +244,15 @@ def bubble_box(header, speech, has_header, max_w=MAX_W):
 
 
 def paint_bubble(cr, x0, y0, bw, bh, tail, header, speech, has_header):
-    """Bubble body at (x0, y0) sized (bw, bh); tail = ("down", x) or ("left", y)."""
+    """Bubble body at (x0, y0) sized (bw, bh); tail = ("down", x), ("left", y) or ("right", y)."""
     r, (side, at) = RADIUS, tail
     x1, y1 = x0 + bw, y0 + bh
     cr.new_sub_path()
     cr.arc(x1 - r, y0 + r, r, -math.pi / 2, 0)
+    if side == "right":
+        cr.line_to(x1, at - 9)
+        cr.line_to(x1 + TAIL_H, at - 2)
+        cr.line_to(x1, at + 9)
     cr.arc(x1 - r, y1 - r, r, 0, math.pi / 2)
     if side == "down":
         cr.line_to(at + 9, y1)

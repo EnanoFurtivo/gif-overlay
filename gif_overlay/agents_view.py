@@ -1,7 +1,8 @@
 """Top-left corner: one sprite per active Claude agent, plus "needs you" bubbles."""
 import glob, json, math, os, re, sys, time
 
-from gif_overlay.agents import INDENT, AgentTracker, gif_for_level, layout, level_gifs
+from gif_overlay.agents import (INDENT, AgentTracker, format_elapsed, gif_for_level, layout,
+                                level_gifs)
 from gif_overlay.bubble import EDGE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
                                  PangoCairo, Tween, cairo, clear_bg, neon_stroke)
@@ -11,7 +12,21 @@ SESSIONS_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expandu
 BUBBLE_MAX_W = 300
 CAPTION_MAX_W = 160
 CHAT_URL = "claude://code/needs-input?session={}"
+CAPTION_PAD_X, CAPTION_PAD_Y = 6, 2
+BADGE_OVERHANG = 8  # timer badges stick out of the tile corner by this much
+SMALL_TILE = 36     # tiles smaller than this get their badge beside them
+BADGE_SIDE_W = 44   # room for a badge beside a small tile
 LOCAL_ID = re.compile(r"local_[0-9a-f-]+")
+
+
+
+def pill(cr, x, y, w, h):
+    """Rounded-end rectangle path."""
+    r = h / 2
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, math.pi / 2)
+    cr.arc(x + r, y + r, r, math.pi / 2, 3 * math.pi / 2)
+    cr.close_path()
 
 
 class Gif:
@@ -65,7 +80,7 @@ class AgentsView:
         self.gifs = {}             # path -> Gif, loaded on first use
         self.chats = {}            # Claude Code session id -> (desktop local id, title)
         self.chats_read_at = 0.0
-        self.placements, self.bubbles, self.captions = [], {}, {}
+        self.placements, self.bubbles, self.captions, self.started = [], {}, {}, {}
         self.fade = Tween(1.0, lambda _v: self.area.queue_draw(), duration=0.2)
         self.warned = False
         self.shown_key = None
@@ -112,6 +127,8 @@ class AgentsView:
     def tick(self):
         if self.placements and self.rows_key() != self.shown_key:
             self.refresh()
+        elif self.placements:
+            self.area.queue_draw()  # the timer badges
         return True
 
     def chat(self, sid):
@@ -175,14 +192,19 @@ class AgentsView:
 
         def caption_size(sid):
             w, h = self.captions[sid].get_pixel_size()
-            return w + 4, h + 2  # room for the outline
+            return w + 2 * CAPTION_PAD_X, h + 2 * CAPTION_PAD_Y  # room for the pill
 
         def bubble_size(sid):
             bw, bh = bubble_box(*self.bubbles[sid], True, max_w=BUBBLE_MAX_W)
             return bw + TAIL_H + 2 * EDGE, bh + 2 * EDGE
 
-        rows = [{"id": s.id, "agents": [d for _a, d in self.tracker.tree(s)],
-                 "waiting": bool(s.waiting)} for s in sessions]
+        trees = {s.id: self.tracker.tree(s) for s in sessions}
+        rows = [{"id": s.id, "agents": [d for _a, d in trees[s.id]], "waiting": bool(s.waiting)}
+                for s in sessions]
+        # when each tile's agent appeared, for its timer badge (index -1 = the session)
+        self.started = {(s.id, -1): s.first_seen for s in sessions}
+        self.started.update({(s.id, i): s.agent_started.get(agent, s.first_seen)
+                             for s in sessions for i, (agent, _d) in enumerate(trees[s.id])})
         self.placements, w, h = layout(rows, size, aspect, bubble_size, caption_size)
         used = {self.path_for(p.depth) for p in self.placements if p.kind == "sprite"}
         for path, g in self.gifs.items():
@@ -190,7 +212,10 @@ class AgentsView:
         for path in used:
             self.gif(path).start()
 
-        w, h = w + 2 * EDGE, h + 2 * EDGE  # everything is drawn EDGE in, so glows fit
+        # everything is drawn EDGE in, so glows fit; timer badges overhang tile corners
+        side = max([p.x + p.w + BADGE_SIDE_W for p in self.placements
+                    if p.kind == "sprite" and p.h < SMALL_TILE] + [0])
+        w, h = max(w + BADGE_OVERHANG, side) + 2 * EDGE, h + 2 * EDGE + BADGE_OVERHANG
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         if not self.win.get_visible():
@@ -273,24 +298,45 @@ class AgentsView:
         cr.set_source_surface(surf, p.x + pad, p.y + pad)
         cr.paint_with_alpha(a)
 
+    def draw_badge(self, cr, p):
+        """Neon pill on the tile's bottom-right corner: how long this agent has been around."""
+        started = self.started.get((p.session_id, p.index))
+        if started is None:
+            return
+        a = self.fade.value
+        layout = self.area.create_pango_layout(format_elapsed(time.monotonic() - started))
+        layout.set_font_description(Pango.FontDescription.from_string(
+            "Sans Bold 7" if p.depth == 0 else "Sans Bold 6"))
+        tw, th = layout.get_pixel_size()
+        bw, bh = tw + 8, th + 2
+        if p.h < SMALL_TILE:  # beside small tiles, so it doesn't cover them
+            x, y = p.x + p.w + 4, p.y + (p.h - bh) / 2
+        else:                  # on the corner of bigger ones
+            x, y = p.x + p.w - bw + BADGE_OVERHANG, p.y + p.h - bh + BADGE_OVERHANG // 2
+        pill(cr, x, y, bw, bh)
+        cr.set_source_rgba(0.043, 0.055, 0.078, a)
+        cr.fill_preserve()
+        neon_stroke(cr, a, width=1, glow=0.45)
+        cr.set_source_rgba(0.72, 1.0, 1.0, a)
+        cr.move_to(x + 4, y + 1)
+        PangoCairo.show_layout(cr, layout)
+
     def draw(self, _w, cr):
         cr.translate(EDGE, EDGE)
         self.draw_tree_lines(cr)
         for p in self.placements:
             if p.kind == "sprite":
                 self.draw_tile(cr, p)
-            elif p.kind == "caption":  # name tag: white text with a dark outline
-                cr.push_group()
-                cr.move_to(p.x + 2, p.y + 1)
-                PangoCairo.layout_path(cr, self.captions[p.session_id])
-                cr.set_source_rgba(0.08, 0.08, 0.08, 0.9)
-                cr.set_line_width(3)
-                cr.set_line_join(cairo.LINE_JOIN_ROUND)
-                cr.stroke_preserve()
-                cr.set_source_rgba(1, 1, 1, 1)
-                cr.fill()
-                cr.pop_group_to_source()
-                cr.paint_with_alpha(self.fade.value)
+                self.draw_badge(cr, p)
+            elif p.kind == "caption":  # name tag: white text on a dark neon pill
+                a = self.fade.value
+                pill(cr, p.x, p.y, p.w, p.h)
+                cr.set_source_rgba(0.043, 0.055, 0.078, a)
+                cr.fill_preserve()
+                neon_stroke(cr, a, width=1, glow=0.5)
+                cr.set_source_rgba(1, 1, 1, a)
+                cr.move_to(p.x + CAPTION_PAD_X, p.y + CAPTION_PAD_Y)
+                PangoCairo.show_layout(cr, self.captions[p.session_id])
             elif p.kind == "more":
                 layout = self.area.create_pango_layout(f"+{p.index}")
                 layout.set_font_description(Pango.FontDescription.from_string("Sans Bold 10"))
