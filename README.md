@@ -86,3 +86,7 @@ Flags given on the command line are saved and become the new defaults.
 ```bash
 python -I tests/test_helpers.py
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
