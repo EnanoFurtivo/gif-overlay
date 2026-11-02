@@ -2,8 +2,8 @@
 import os, sys, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gif_overlay.helpers import (BubbleQueue, display_seconds, make_note, panel_offset,
-                                 parse_panels, plain_text)
+from gif_overlay.helpers import (BubbleQueue, display_seconds, duck_targets, make_note,
+                                 panel_offset, parse_panels, plain_text, scaled_volumes)
 
 
 def note(app, n=0, replaces=0):
@@ -63,6 +63,30 @@ def test_queue_replaces_same_app():
     q.push(note("B", 2))
     assert q.push(note("A", 3, replaces=5)) == "replaced"
     assert [q.pop()["summary"], q.pop()["summary"], q.pop()] == ["s3", "s2", None]
+
+def test_queue_push_front():
+    q = BubbleQueue(maxlen=2)
+    q.push(note("a", 1)); q.push(note("b", 2))
+    q.push_front(note("w", 9))
+    assert [q.pop()["summary"], q.pop()["summary"], q.pop()] == ["s9", "s1", None]
+
+def vol(*values):
+    return {f"ch{i}": {"value": v, "value_percent": "x"} for i, v in enumerate(values)}
+
+def test_duck_targets_skip_ours_and_paused():
+    inputs = [
+        {"index": 1, "corked": False, "volume": vol(65536, 60000),
+         "properties": {"application.name": "Brave"}},
+        {"index": 2, "corked": True, "volume": vol(65536),
+         "properties": {"application.name": "Spotify"}},
+        {"index": 3, "corked": False, "volume": vol(30000),
+         "properties": {"application.name": "gif-overlay"}},
+        {"index": 4, "corked": False, "volume": vol(40000, 40000), "properties": {}},
+    ]
+    assert duck_targets(inputs) == {1: [65536, 60000], 4: [40000, 40000]}
+
+def test_scaled_volumes():
+    assert scaled_volumes({1: [65536, 60000]}, 0.3) == {1: [19661, 18000]}
 
 def test_queue_clear():
     q = BubbleQueue()

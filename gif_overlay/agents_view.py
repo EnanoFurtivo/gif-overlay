@@ -84,6 +84,7 @@ class AgentsView:
         self.fade = Tween(1.0, self.invalidate, duration=0.2)
         self.layers = None         # (size, under, over) cached drawing; GIF frames go between
         self.frame_pending = False
+        self.was_waiting = set()
         self.warned = False
         self.shown_key = None
 
@@ -183,6 +184,10 @@ class AgentsView:
             self.hide()
             return
         self.levels = self.scan_levels()  # cheap; lets new levelN.gif files show up live
+        waiting = {s.id for s in sessions if s.waiting}
+        if waiting - self.was_waiting:  # someone new needs you: say "a"
+            self.app.sound.play()
+        self.was_waiting = waiting
         self.bubbles = {s.id: bubble_layouts(self.area, self.session_name(s), "", s.waiting,
                                              max_w=BUBBLE_MAX_W)
                         for s in sessions if s.waiting}

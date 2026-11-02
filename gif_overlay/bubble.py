@@ -72,10 +72,17 @@ class Bubble:
     def enqueue(self, note):
         if self.note and note["replaces"] and note["app"] == self.note["app"]:
             self.show(note)  # an update of what's on screen: say it again
+        elif self.note and self.note.get("sticky") and not note.get("sticky"):
+            self.queue.push_front(self.note)  # a reminder steps aside, comes back after
+            self.show(note)
         elif self.note or self.step_src:
             self.queue.push(note)
         else:
             self.show(note)
+
+    def has_sticky(self):
+        return bool(self.note and self.note.get("sticky")) or \
+            any(n.get("sticky") for n in self.queue.notes)
 
     def clear(self):
         self.cancel_step()
@@ -119,6 +126,7 @@ class Bubble:
         self.rise.to(0.0)
         self.last_tick = time.monotonic()
         self.step_src = GLib.timeout_add(16, self.type_tick)
+        self.app.sound.play()
 
     def window_height(self):
         return self.box[1] + 2 * EDGE
@@ -146,7 +154,7 @@ class Bubble:
         self.typing_done = True
         self.step_src = None
         self.display_left = display_seconds(self.note["summary"] + " " + self.note["body"])
-        if not self.hovered:
+        if not self.hovered and not self.note.get("sticky"):  # sticky ones wait for a click
             self.start_display()
         return False
 
@@ -178,7 +186,7 @@ class Bubble:
     def on_click(self, _w, event):
         if not self.note:
             return True
-        if event.button == 1:
+        if event.button == 1 and not self.note.get("own"):  # our own reminders have no app
             launch_app(self.note)
         self.finish()
         return True
@@ -193,7 +201,8 @@ class Bubble:
 
     def on_leave(self, *_):
         self.hovered = False
-        if self.note and self.step_src is None and self.typing_done and self.display_from is None:
+        if (self.note and self.step_src is None and self.typing_done
+                and self.display_from is None and not self.note.get("sticky")):
             self.display_left = max(self.display_left, 1.5)
             self.start_display()
         return False

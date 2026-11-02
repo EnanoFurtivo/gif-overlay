@@ -23,7 +23,8 @@ CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~
 PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay.pid")
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
                 monitor=None, pixel=False, hidden=False, agents=True, agent_size=54,
-                gifs_dir="~/gifs")
+                gifs_dir="~/gifs", sound="~/.local/share/gif-overlay/sounds/notification.wav",
+                duck=0.3, water_minutes=15)
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
                                "settings.json")
 # GLib.unix_signal_add only supports HUP, INT, TERM, USR1, USR2 and WINCH
@@ -77,6 +78,10 @@ p.add_argument("--agents", action=argparse.BooleanOptionalAction,
                help="a sprite per running Claude agent in the top-left corner")
 p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px, default 54)")
 p.add_argument("--gifs-dir", help="folder the agent sprites are picked from (default ~/gifs)")
+p.add_argument("--sound", help="sound played with each bubble (WAV best; 'none' = silent)")
+p.add_argument("--duck", type=float,
+               help="other apps' volume while the sound plays (0-1, default 0.3; 1 = don't dim)")
+p.add_argument("--water-minutes", type=float, help="water reminder every N minutes (0 = off)")
 g = p.add_mutually_exclusive_group()
 for name in COMMANDS:
     g.add_argument("--" + name.replace("_", "-"), action="store_true",
@@ -141,6 +146,8 @@ if cfg["monitor"] is not None and str(cfg["monitor"]).lstrip("-").isdigit():
     cfg["monitor"] = int(cfg["monitor"])
 if cfg["monitor"] == -1:
     cfg["monitor"] = None
+if str(cfg["sound"]).lower() == "none":
+    cfg["sound"] = ""
 if not cfg["gif"]:
     p.error("no GIF given and none saved in " + CONFIG)
 if args.gif:
@@ -151,6 +158,8 @@ from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, 
                                  clear_bg)
 from gif_overlay.bubble import Bubble
 from gif_overlay.agents_view import AgentsView
+from gif_overlay.sound import Sound
+from gif_overlay.water import WaterReminder
 
 
 # ---------------------------------------------------------------- window
@@ -523,8 +532,10 @@ def on_notification(note):
     return False
 
 
+sound = Sound(sys.modules[__name__])
 bubble = Bubble(sys.modules[__name__])
 agents = AgentsView(sys.modules[__name__])
+water = WaterReminder(sys.modules[__name__])
 
 
 # ---------------------------------------------------------------- show / hide / quit

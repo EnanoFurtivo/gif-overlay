@@ -51,6 +51,11 @@ class BubbleQueue:
         del self.notes[:-self.maxlen]
         return "queued"
 
+    def push_front(self, note):
+        """Put a note back at the head of the line (a reminder that got interrupted)."""
+        self.notes.insert(0, note)
+        del self.notes[self.maxlen:]
+
     def pop(self):
         return self.notes.pop(0) if self.notes else None
 
@@ -59,3 +64,22 @@ class BubbleQueue:
 
     def __len__(self):
         return len(self.notes)
+
+
+# ---------------------------------------------------------------- music ducking
+def duck_targets(sink_inputs, own_name="gif-overlay"):
+    """{stream index: [raw channel volumes]} of other apps' playing streams (pactl JSON)."""
+    targets = {}
+    for stream in sink_inputs:
+        props = stream.get("properties") or {}
+        if stream.get("corked") or props.get("application.name") == own_name:
+            continue
+        try:
+            targets[int(stream["index"])] = [int(ch["value"]) for ch in stream["volume"].values()]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return targets
+
+
+def scaled_volumes(volumes, ratio):
+    return {index: [round(v * ratio) for v in channels] for index, channels in volumes.items()}
