@@ -2,7 +2,7 @@
 
 Pure (no GTK); unit-tested in tests/test_agents.py.
 """
-import copy, random
+import copy, os, re
 from collections import namedtuple
 from dataclasses import dataclass, field
 
@@ -79,7 +79,8 @@ class SessionState:
     working: bool = False
     waiting: str | None = None       # why it needs the user, or None
     stopped_at: float | None = None
-    agents: dict = field(default_factory=dict)  # running subagent id -> depth (1 = direct)
+    agents: dict = field(default_factory=dict)   # running subagent id -> depth (1 = direct)
+    parents: dict = field(default_factory=dict)  # running subagent id -> its spawner's id
     cwd: str = ""
 
 
@@ -122,8 +123,10 @@ class AgentTracker:
         elif name == "SubagentStart":
             parent = payload.get("parent_agent_id")
             s.agents[agent] = s.agents[parent] + 1 if parent in s.agents else 1
+            s.parents[agent] = parent
         elif name == "SubagentStop":
             s.agents.pop(agent, None)
+            s.parents.pop(agent, None)
         elif name == "Notification":
             s.waiting = str(payload.get("message") or "needs your input")
         elif name == "PermissionRequest":
@@ -144,63 +147,87 @@ class AgentTracker:
                        or (s.stopped_at is not None and now - s.stopped_at < self.idle_grace)),
                       key=lambda s: s.first_seen)
 
+    def tree(self, session):
+        """[(agent id, depth)] with every subagent right under the one that spawned it."""
+        children = {}
+        for agent in session.agents:  # dicts keep start order
+            parent = session.parents.get(agent)
+            children.setdefault(parent if parent in session.agents else None, []).append(agent)
+        out, stack = [], list(reversed(children.get(None, [])))
+        while stack:
+            agent = stack.pop()
+            out.append((agent, session.agents[agent]))
+            stack.extend(reversed(children.get(agent, [])))
+        return out
+
     def any_waiting(self, now):
         return any(s.waiting for s in self.active(now))
 
 
-# ---------------------------------------------------------------- picking
-def pick_gif(gifs, session_id, depth, exclude):
-    """A GIF for (session, depth) that stays the same for as long as the session lives."""
-    pool = [g for g in gifs if g not in exclude] or list(gifs)
-    return random.Random(f"{session_id}:{depth}").choice(pool) if pool else None
+# ---------------------------------------------------------------- level GIFs
+LEVEL_FILE = re.compile(r"level(\d+)\.(gif|webp)$", re.IGNORECASE)
 
 
-def session_gifs(gifs, session_id, max_depth, main_gif):
-    """GIF per depth 0..max_depth; a level never repeats its parent level or the main GIF."""
-    picks = []
-    for depth in range(max_depth + 1):
-        exclude = {main_gif} | ({picks[-1]} if picks else set())
-        picks.append(pick_gif(gifs, session_id, depth, exclude) or main_gif)
-    return picks
+def level_gifs(paths):
+    """{level: path} for files named level1.gif, level2.gif... (level 1 = Claude sessions)."""
+    levels = {}
+    for path in paths:
+        m = LEVEL_FILE.fullmatch(os.path.basename(path))
+        if m:
+            levels[int(m.group(1))] = path
+    return levels
+
+
+def gif_for_level(levels, level, main_gif):
+    """The level's own GIF, else the deepest one above it, else the nearest below, else main."""
+    above = [n for n in levels if n <= level]
+    below = [n for n in levels if n > level]
+    if above:
+        return levels[max(above)]
+    return levels[min(below)] if below else main_gif
 
 
 # ---------------------------------------------------------------- layout
 Placement = namedtuple("Placement", "kind session_id index x y w h depth")
-DEPTH_RATIO, ROW_GAP, SPRITE_GAP, MAX_AGENTS, MORE_W, MORE_H = 0.65, 10, 6, 12, 40, 24
+DEPTH_RATIO, INDENT, V_GAP, SESSION_GAP, CAPTION_GAP, BUBBLE_GAP = 0.65, 18, 4, 12, 2, 8
+MAX_AGENTS, MORE_W, MORE_H = 12, 40, 20
 
 
-def layout(rows, agent_size, aspect, bubble_size):
-    """Place one row per session, top-left origin.
+def layout(rows, agent_size, aspect, bubble_size, caption_size):
+    """One column from the top-left: each session, its name, then its subagents below it.
 
-    rows: [{"id", "agents": [depth, ...], "waiting": bool}]; aspect(session_id, depth) gives
-    the GIF's width/height, bubble_size(session_id) the (w, h) of its bubble. Returns
-    (placements, width, height). Sprite index = position in "agents" (-1 = the session);
-    a "more" placement's index is how many sprites didn't fit.
+    rows: [{"id", "agents": [depth, ...] in tree order, "waiting": bool}]; aspect(depth) is
+    that level's GIF width/height, bubble_size / caption_size(session_id) give (w, h).
+    Returns (placements, width, height). Sprite index = position in "agents" (-1 = the
+    session); a "more" placement's index is how many subagents didn't fit.
     """
     placements, width, y = [], 0, 0
     for row in rows:
         sid, h0 = row["id"], agent_size
-        bw, bh = bubble_size(sid) if row["waiting"] else (0, 0)
-        row_h = max(h0, bh)
-        top = y + (row_h - h0) // 2
-        base = top + h0  # sprites stand on the session sprite's bottom line
-        w0 = round(h0 * aspect(sid, 0))
-        placements.append(Placement("sprite", sid, -1, 0, top, w0, h0, 0))
-        x = w0 + SPRITE_GAP
-        ordered = sorted(enumerate(row["agents"]), key=lambda item: (item[1], item[0]))
-        for index, depth in ordered[:MAX_AGENTS]:
+        w0 = round(h0 * aspect(0))
+        placements.append(Placement("sprite", sid, -1, 0, y, w0, h0, 0))
+        cw, ch = caption_size(sid)
+        placements.append(Placement("caption", sid, -1, max(0, (w0 - cw) // 2),
+                                    y + h0 + CAPTION_GAP, cw, ch, 0))
+        bottom = y + h0 + CAPTION_GAP + ch
+        if row["waiting"]:  # beside the session sprite, tail pointing at it
+            bw, bh = bubble_size(sid)
+            bx, by = max(w0, cw) + BUBBLE_GAP, y + max(0, (h0 - bh) // 2)
+            placements.append(Placement("bubble", sid, -1, bx, by, bw, bh, 0))
+            bubble_bottom = by + bh
+        else:
+            bubble_bottom = y
+        cursor = bottom + V_GAP
+        for index, depth in enumerate(row["agents"][:MAX_AGENTS]):
             h = round(agent_size * DEPTH_RATIO ** depth)
-            w = round(h * aspect(sid, depth))
-            placements.append(Placement("sprite", sid, index, x, base - h, w, h, depth))
-            x += w + SPRITE_GAP
-        if len(ordered) > MAX_AGENTS:
-            placements.append(Placement("more", sid, len(ordered) - MAX_AGENTS, x,
-                                        base - MORE_H, MORE_W, MORE_H, 0))
-            x += MORE_W + SPRITE_GAP
-        right = x - SPRITE_GAP
-        if row["waiting"]:
-            placements.append(Placement("bubble", sid, -1, x, y + (row_h - bh) // 2, bw, bh, 0))
-            right = x + bw
-        width = max(width, right)
-        y += row_h + ROW_GAP
-    return placements, width, (y - ROW_GAP if rows else 0)
+            w = round(h * aspect(depth))
+            placements.append(Placement("sprite", sid, index, INDENT * depth, cursor, w, h, depth))
+            cursor += h + V_GAP
+        if len(row["agents"]) > MAX_AGENTS:
+            placements.append(Placement("more", sid, len(row["agents"]) - MAX_AGENTS, INDENT,
+                                        cursor, MORE_W, MORE_H, 1))
+            cursor += MORE_H + V_GAP
+        y = max(cursor - V_GAP, bubble_bottom) + SESSION_GAP
+    for p in placements:
+        width = max(width, p.x + p.w)
+    return placements, width, (y - SESSION_GAP if rows else 0)

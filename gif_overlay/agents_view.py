@@ -1,7 +1,7 @@
 """Top-left corner: one sprite per active Claude agent, plus "needs you" bubbles."""
 import glob, json, os, sys, time
 
-from gif_overlay.agents import AgentTracker, layout, session_gifs
+from gif_overlay.agents import AgentTracker, gif_for_level, layout, level_gifs
 from gif_overlay.bubble import STROKE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
                                  PangoCairo, Tween, cairo, clear_bg)
@@ -9,6 +9,7 @@ from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, 
 SESSIONS_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                             "Claude", "claude-code-sessions")
 BUBBLE_MAX_W = 300
+CAPTION_MAX_W = 160
 CHAT_URL = "claude://code/needs-input?session={}"
 
 
@@ -59,12 +60,12 @@ class AgentsView:
     def __init__(self, app):
         self.app = app             # the gif_overlay.app module: cfg, monitor_geometry()...
         self.tracker = AgentTracker()
-        self.gif_paths = self.scan_gifs()
+        self.levels = {}           # level -> GIF path (level 1 = Claude sessions)
         self.gifs = {}             # path -> Gif, loaded on first use
         self.chats = {}            # Claude Code session id -> (desktop local id, title)
         self.chats_read_at = 0.0
-        self.placements, self.picks, self.bubbles = [], {}, {}
-        self.fades = {}            # sprite name -> Tween of its opacity
+        self.placements, self.bubbles, self.captions = [], {}, {}
+        self.fade = Tween(1.0, lambda _v: self.area.queue_draw(), duration=0.2)
         self.warned = False
         self.shown_key = None
 
@@ -87,9 +88,12 @@ class AgentsView:
         GLib.timeout_add_seconds(1, self.tick)  # idle grace and stale sessions expire
 
     # -- inputs
-    def scan_gifs(self):
+    def scan_levels(self):
         folder = os.path.expanduser(self.app.cfg["gifs_dir"])
-        return sorted(p for ext in ("gif", "webp") for p in glob.glob(os.path.join(folder, "*." + ext)))
+        return level_gifs(glob.glob(os.path.join(folder, "*")))
+
+    def path_for(self, depth):
+        return gif_for_level(self.levels, depth + 1, self.app.cfg["gif"])
 
     def event(self, text):
         try:
@@ -135,10 +139,16 @@ class AgentsView:
                 self.gifs[path] = Gif(self.app.cfg["gif"], self.area.queue_draw)
         return self.gifs[path]
 
-    def bubble_layouts(self, session):
-        local, title = self.chat(session.id)
-        header = title or os.path.basename(session.cwd.rstrip("/")) or "Claude"
-        return bubble_layouts(self.area, header, "", session.waiting or "", max_w=BUBBLE_MAX_W)
+    def session_name(self, session):
+        return (self.chat(session.id)[1] or os.path.basename(session.cwd.rstrip("/"))
+                or "Claude")
+
+    def caption_layout(self, session):
+        layout = self.area.create_pango_layout(self.session_name(session))
+        layout.set_font_description(Pango.FontDescription.from_string("Sans Bold 8"))
+        layout.set_width(CAPTION_MAX_W * Pango.SCALE)
+        layout.set_ellipsize(Pango.EllipsizeMode.END)
+        return layout
 
     def refresh(self):
         if self.app.cfg["hidden"] or not self.app.cfg["agents"]:
@@ -149,23 +159,28 @@ class AgentsView:
         if not sessions:
             self.hide()
             return
-        main = self.app.cfg["gif"]
-        self.picks = {s.id: session_gifs(self.gif_paths, s.id, max(s.agents.values(), default=0),
-                                         main) for s in sessions}
-        self.bubbles = {s.id: self.bubble_layouts(s) for s in sessions if s.waiting}
+        self.levels = self.scan_levels()  # cheap; lets new levelN.gif files show up live
+        self.bubbles = {s.id: bubble_layouts(self.area, self.session_name(s), "", s.waiting,
+                                             max_w=BUBBLE_MAX_W)
+                        for s in sessions if s.waiting}
+        self.captions = {s.id: self.caption_layout(s) for s in sessions}
         size = self.app.cfg["agent_size"]
 
-        def aspect(sid, depth):
-            return self.gif(self.picks[sid][depth]).aspect()
+        def aspect(depth):
+            return self.gif(self.path_for(depth)).aspect()
+
+        def caption_size(sid):
+            w, h = self.captions[sid].get_pixel_size()
+            return w + 4, h + 2  # room for the outline
 
         def bubble_size(sid):
             bw, bh = bubble_box(*self.bubbles[sid], True, max_w=BUBBLE_MAX_W)
             return bw + TAIL_H + 2 * STROKE, bh + 2 * STROKE
 
-        rows = [{"id": s.id, "agents": list(s.agents.values()), "waiting": bool(s.waiting)}
-                for s in sessions]
-        self.placements, w, h = layout(rows, size, aspect, bubble_size)
-        used = {p for picks in self.picks.values() for p in picks}
+        rows = [{"id": s.id, "agents": [d for _a, d in self.tracker.tree(s)],
+                 "waiting": bool(s.waiting)} for s in sessions]
+        self.placements, w, h = layout(rows, size, aspect, bubble_size, caption_size)
+        used = {self.path_for(p.depth) for p in self.placements if p.kind == "sprite"}
         for path, g in self.gifs.items():
             g.start() if path in used else g.stop()
         for path in used:
@@ -198,41 +213,48 @@ class AgentsView:
             g.stop()
         self.win.hide()
 
-    # -- hover (names come from rects())
-    def name(self, p):
-        return f"agent:{p.session_id}:{p.index}"
-
+    # -- hover: the whole column (gaps included) is one area, everything fades together
     def rects(self):
-        """'name:x,y,w,h' of every sprite in KWin's global coordinates."""
-        if not self.placements:
+        """['agents:x,y,w,h'] — the column of sprites and names, in KWin's coordinates."""
+        boxes = [p for p in self.placements if p.kind != "bubble"]
+        if not boxes:
             return []
         mx, my, _, _ = self.app.monitor_geometry()
         m = self.app.cfg["margin"]
-        return [f"{self.name(p)}:{mx + m + p.x},{my + m + p.y},{p.w},{p.h}"
-                for p in self.placements if p.kind == "sprite"]
+        w = max(p.x + p.w for p in boxes)
+        h = max(p.y + p.h for p in boxes)
+        return [f"agents:{mx + m},{my + m},{w},{h}"]
 
-    def hover(self, name, on):
-        fade = self.fades.get(name)
-        if fade is None:
-            fade = self.fades[name] = Tween(1.0, lambda _v: self.area.queue_draw(), duration=0.2)
-        fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
+    def hover(self, _name, on):
+        self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
 
     # -- drawing and clicks
     def draw(self, _w, cr):
         for p in self.placements:
             if p.kind == "sprite":
-                surf = self.gif(self.picks[p.session_id][p.depth]).surface(p.w, p.h)
+                surf = self.gif(self.path_for(p.depth)).surface(p.w, p.h)
                 cr.set_source_surface(surf, p.x, p.y)
-                fade = self.fades.get(self.name(p))
-                cr.paint_with_alpha(fade.value if fade else 1.0)
+                cr.paint_with_alpha(self.fade.value)
+            elif p.kind == "caption":  # name tag: white text with a dark outline
+                cr.push_group()
+                cr.move_to(p.x + 2, p.y + 1)
+                PangoCairo.layout_path(cr, self.captions[p.session_id])
+                cr.set_source_rgba(0.08, 0.08, 0.08, 0.9)
+                cr.set_line_width(3)
+                cr.set_line_join(cairo.LINE_JOIN_ROUND)
+                cr.stroke_preserve()
+                cr.set_source_rgba(1, 1, 1, 1)
+                cr.fill()
+                cr.pop_group_to_source()
+                cr.paint_with_alpha(self.fade.value)
             elif p.kind == "more":
                 layout = self.area.create_pango_layout(f"+{p.index}")
                 layout.set_font_description(Pango.FontDescription.from_string("Sans Bold 10"))
                 tw, th = layout.get_pixel_size()
-                cr.set_source_rgba(0.1, 0.1, 0.1, 0.7)
+                cr.set_source_rgba(0.1, 0.1, 0.1, 0.7 * self.fade.value)
                 cr.rectangle(p.x, p.y, p.w, p.h)
                 cr.fill()
-                cr.set_source_rgba(1, 1, 1, 1)
+                cr.set_source_rgba(1, 1, 1, self.fade.value)
                 cr.move_to(p.x + (p.w - tw) / 2, p.y + (p.h - th) / 2)
                 PangoCairo.show_layout(cr, layout)
             elif p.kind == "bubble":
@@ -240,7 +262,8 @@ class AgentsView:
                 x0, y0 = p.x + STROKE + TAIL_H, p.y + STROKE
                 bw, bh = p.w - TAIL_H - 2 * STROKE, p.h - 2 * STROKE
                 session_sprite = next(q for q in self.placements
-                                      if q.session_id == p.session_id and q.index == -1)
+                                      if q.kind == "sprite" and q.session_id == p.session_id
+                                      and q.index == -1)
                 tail_y = min(max(session_sprite.y + session_sprite.h / 2, y0 + 16), y0 + bh - 16)
                 paint_bubble(cr, x0, y0, bw, bh, ("left", tail_y), header, speech, True)
         return True

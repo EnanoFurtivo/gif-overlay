@@ -2,8 +2,8 @@
 import os, sys, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gif_overlay.agents import (AgentTracker, HOOK_MARKER, layout, merge_hooks, pick_gif,
-                                remove_hooks, session_gifs)
+from gif_overlay.agents import (AgentTracker, HOOK_MARKER, gif_for_level, layout, level_gifs,
+                                merge_hooks, remove_hooks)
 
 
 def ev(name, sid="s1", **kw):
@@ -109,60 +109,72 @@ def test_active_in_first_seen_order_and_cwd_kept():
     assert t.active(2)[0].cwd == "/x/proj"
 
 
-# ---------------------------------------------------------------- picking
-def test_pick_gif_stable_and_excludes():
-    gifs = [f"g{i}" for i in range(9)]
-    a = pick_gif(gifs, "sess", 0, {"g0"})
-    assert a == pick_gif(gifs, "sess", 0, {"g0"}) and a != "g0"
-    picks = session_gifs(gifs, "sess", 3, "g0")
-    assert len(picks) == 4 and "g0" not in picks
-    assert all(picks[d] != picks[d - 1] for d in range(1, 4))
+# ---------------------------------------------------------------- tree order
+def test_tree_order_puts_children_under_parents():
+    t = AgentTracker()
+    for aid, parent in [("a", None), ("b", None), ("c", "a"), ("d", "c"), ("e", "b")]:
+        t.event(ev("SubagentStart", agent_id=aid, parent_agent_id=parent), 0)
+    s = t.active(0)[0]
+    assert t.tree(s) == [("a", 1), ("c", 2), ("d", 3), ("b", 1), ("e", 2)]
+    t.event(ev("SubagentStop", agent_id="a"), 1)
+    assert t.tree(s) == [("b", 1), ("e", 2), ("c", 2), ("d", 3)]
 
-def test_pick_gif_small_folders():
-    assert session_gifs([], "s", 2, "main") == ["main", "main", "main"]
-    assert session_gifs(["main"], "s", 1, "main") == ["main", "main"]
-    two = session_gifs(["main", "b"], "s", 1, "main")
-    assert two[0] == "b" and two[1] in ("main", "b")
+
+# ---------------------------------------------------------------- level GIFs
+def test_level_gifs_from_folder():
+    paths = ["/g/level1.gif", "/g/level3.webp", "/g/rumba.gif", "/g/Level2.GIF", "/g/level.gif"]
+    assert level_gifs(paths) == {1: "/g/level1.gif", 2: "/g/Level2.GIF", 3: "/g/level3.webp"}
+
+def test_gif_for_level_falls_back_to_deepest():
+    levels = {1: "a", 3: "c"}
+    assert [gif_for_level(levels, n, "main") for n in (1, 2, 3, 5)] == ["a", "a", "c", "c"]
+    assert gif_for_level({3: "c"}, 1, "main") == "c"
+    assert gif_for_level({}, 2, "main") == "main"
 
 
 # ---------------------------------------------------------------- layout
-def square(_sid, _depth):
+def square(_depth):
     return 1.0
 
 def no_bubble(_sid):
     return (0, 0)
 
-def sprites(placements):
+def caption(_sid):
+    return (60, 14)
+
+def boxes(placements):
     return [(p.kind, p.session_id, p.index, p.x, p.y, p.w, p.h, p.depth) for p in placements]
 
-def test_layout_rows_and_depth_sizes():
+def test_layout_tree_column():
     rows = [{"id": "a", "agents": [1, 2, 1], "waiting": False},
             {"id": "b", "agents": [], "waiting": False}]
-    placements, w, h = layout(rows, 100, square, no_bubble)
-    assert sprites(placements) == [
+    placements, w, h = layout(rows, 100, square, no_bubble, caption)
+    assert boxes(placements) == [
         ("sprite", "a", -1, 0, 0, 100, 100, 0),
-        ("sprite", "a", 0, 106, 35, 65, 65, 1),
-        ("sprite", "a", 2, 177, 35, 65, 65, 1),
-        ("sprite", "a", 1, 248, 58, 42, 42, 2),
-        ("sprite", "b", -1, 0, 110, 100, 100, 0),
+        ("caption", "a", -1, 20, 102, 60, 14, 0),
+        ("sprite", "a", 0, 18, 120, 65, 65, 1),
+        ("sprite", "a", 1, 36, 189, 42, 42, 2),
+        ("sprite", "a", 2, 18, 235, 65, 65, 1),
+        ("sprite", "b", -1, 0, 312, 100, 100, 0),
+        ("caption", "b", -1, 20, 414, 60, 14, 0),
     ]
-    assert (w, h) == (290, 210)
+    assert (w, h) == (100, 428)
 
 def test_layout_overflow_label():
     placements, _, _ = layout([{"id": "a", "agents": [1] * 30, "waiting": False}], 100, square,
-                              no_bubble)
+                              no_bubble, caption)
     kinds = [p.kind for p in placements]
     assert kinds.count("sprite") == 13 and kinds[-1] == "more"
     assert placements[-1].index == 18
 
-def test_layout_bubble_right_of_row():
+def test_layout_bubble_beside_session_sprite():
     placements, w, h = layout([{"id": "a", "agents": [], "waiting": True}], 100, square,
-                              lambda s: (200, 60))
-    assert sprites(placements)[1] == ("bubble", "a", -1, 106, 20, 200, 60, 0)
-    assert (w, h) == (306, 100)
+                              lambda s: (200, 60), caption)
+    assert boxes(placements)[-1] == ("bubble", "a", -1, 108, 20, 200, 60, 0)
+    assert (w, h) == (308, 116)
     placements, _, h = layout([{"id": "a", "agents": [], "waiting": True}], 100, square,
-                              lambda s: (200, 150))
-    assert sprites(placements)[0][4] == 25 and sprites(placements)[1][4] == 0 and h == 150
+                              lambda s: (200, 150), caption)
+    assert boxes(placements)[-1][4] == 0 and h == 150
 
 
 # ---------------------------------------------------------------- hooks
