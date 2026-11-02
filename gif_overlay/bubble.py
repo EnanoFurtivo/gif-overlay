@@ -207,6 +207,8 @@ def bubble_layouts(widget, header_text, summary, body, typed=None, max_w=MAX_W):
     header = widget.create_pango_layout("")
     header.set_font_description(Pango.FontDescription.from_string("Sans Bold 8"))
     header.set_markup(f"<span foreground='{MUTED}'>{esc(header_text)}</span>", -1)
+    header.set_width((max_w - 2 * PAD) * Pango.SCALE)
+    header.set_ellipsize(Pango.EllipsizeMode.END)
     n = len(summary) + len(body) if typed is None else int(typed)
     parts = []
     if summary:

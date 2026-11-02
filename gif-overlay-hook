@@ -1,0 +1,25 @@
+#!/bin/sh
+# Claude Code hook -> gif-overlay's agent sprites (`gif-overlay --install-hooks` points here).
+# Fire-and-forget, and always exits 0, so it can never get in Claude's way.
+p=$(cat)
+
+field() {  # the first "name": "value" pair before the (possibly huge) tool input
+    printf '%s' "$p" | head -c 4000 | sed 's/"tool_input".*//' \
+        | grep -o "\"$1\": *\"[^\"]*\"" | head -n 1
+}
+
+event=$(field hook_event_name)
+case "$event" in
+    *'"PostToolUse"'*) small=1 ;;
+    *) small= ;;
+esac
+if [ -n "$small" ] || [ ${#p} -gt 60000 ]; then
+    # tool outputs and pasted prompts can outgrow one argument: send only who and what
+    sid=$(field session_id)
+    aid=$(field agent_id)
+    p="{$sid${aid:+, $aid}, $event}"
+fi
+
+busctl --user --timeout=1 --expect-reply=no call local.GifOverlay /local/GifOverlay \
+    local.GifOverlay AgentEvent s "$p" >/dev/null 2>&1
+exit 0

@@ -1,7 +1,7 @@
 """Top-left corner: one sprite per active Claude agent, plus "needs you" bubbles."""
-import glob, json, os, sys, time
+import glob, json, math, os, re, sys, time
 
-from gif_overlay.agents import AgentTracker, gif_for_level, layout, level_gifs
+from gif_overlay.agents import INDENT, AgentTracker, gif_for_level, layout, level_gifs
 from gif_overlay.bubble import STROKE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
                                  PangoCairo, Tween, cairo, clear_bg)
@@ -11,6 +11,7 @@ SESSIONS_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expandu
 BUBBLE_MAX_W = 300
 CAPTION_MAX_W = 160
 CHAT_URL = "claude://code/needs-input?session={}"
+LOCAL_ID = re.compile(r"local_[0-9a-f-]+")
 
 
 class Gif:
@@ -115,13 +116,16 @@ class AgentsView:
 
     def chat(self, sid):
         """(desktop local id, title) of a Claude Code session, or (None, "") for CLI ones."""
-        if sid not in self.chats and time.monotonic() - self.chats_read_at > 5:
+        known = self.chats.get(sid)
+        # re-read now and then: a new chat only gets its title after the first prompt
+        if (known is None or not known[1]) and time.monotonic() - self.chats_read_at > 5:
             self.chats_read_at = time.monotonic()
             for path in glob.glob(os.path.join(SESSIONS_DIR, "*", "*", "local_*.json")):
                 try:
                     with open(path) as f:
                         d = json.load(f)
-                    self.chats[d["cliSessionId"]] = (d["sessionId"], d.get("title") or "")
+                    if LOCAL_ID.fullmatch(d["sessionId"]):  # it goes into a claude:// link
+                        self.chats[d["cliSessionId"]] = (d["sessionId"], d.get("title") or "")
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
         return self.chats.get(sid, (None, ""))
@@ -229,12 +233,56 @@ class AgentsView:
         self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
 
     # -- drawing and clicks
+    def draw_tree_lines(self, cr):
+        """File-tree elbows from each sprite down to the subagents it spawned."""
+        cr.push_group()
+        cr.set_source_rgba(1, 1, 1, 1)
+        cr.set_line_width(2)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+        for i, p in enumerate(self.placements):
+            if p.kind != "sprite" or p.index < 0:
+                continue
+            parent = next(q for q in reversed(self.placements[:i])
+                          if q.kind == "sprite" and q.session_id == p.session_id
+                          and q.depth == p.depth - 1)
+            top = parent.y + parent.h
+            if parent.index < 0:  # a session: start under its name tag
+                top = max(q.y + q.h for q in self.placements[:i]
+                          if q.kind == "caption" and q.session_id == p.session_id)
+            trunk, mid = parent.x + INDENT // 2, p.y + p.h / 2
+            cr.move_to(trunk, top + 2)
+            cr.line_to(trunk, mid)
+            cr.line_to(p.x - 2, mid)
+        cr.stroke()
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(0.35 * self.fade.value)
+
+    def draw_tile(self, cr, p):
+        """Dark glass rounded tile with the GIF inset in it."""
+        a, r = self.fade.value, min(10, p.h * 0.22)
+        cr.new_sub_path()
+        cr.arc(p.x + p.w - r, p.y + r, r, -math.pi / 2, 0)
+        cr.arc(p.x + p.w - r, p.y + p.h - r, r, 0, math.pi / 2)
+        cr.arc(p.x + r, p.y + p.h - r, r, math.pi / 2, math.pi)
+        cr.arc(p.x + r, p.y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+        cr.set_source_rgba(0.07, 0.08, 0.11, 0.86 * a)
+        cr.fill_preserve()
+        cr.set_source_rgba(1, 1, 1, 0.12 * a)
+        cr.set_line_width(1)
+        cr.stroke()
+        pad = max(2, round(p.h * 0.08))
+        surf = self.gif(self.path_for(p.depth)).surface(max(1, p.w - 2 * pad),
+                                                        max(1, p.h - 2 * pad))
+        cr.set_source_surface(surf, p.x + pad, p.y + pad)
+        cr.paint_with_alpha(a)
+
     def draw(self, _w, cr):
+        self.draw_tree_lines(cr)
         for p in self.placements:
             if p.kind == "sprite":
-                surf = self.gif(self.path_for(p.depth)).surface(p.w, p.h)
-                cr.set_source_surface(surf, p.x, p.y)
-                cr.paint_with_alpha(self.fade.value)
+                self.draw_tile(cr, p)
             elif p.kind == "caption":  # name tag: white text with a dark outline
                 cr.push_group()
                 cr.move_to(p.x + 2, p.y + 1)

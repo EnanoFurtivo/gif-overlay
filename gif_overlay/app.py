@@ -12,7 +12,7 @@ usage:   gif-overlay ~/Pictures/thing.gif [--scale 0.3] [--margin 20] ...
 control: gif-overlay --bigger | --smaller | --reset-size | --toggle | --stop
 config:  ~/.config/gif-overlay/config.json
 """
-import argparse, json, os, signal, sys, time, warnings
+import argparse, json, os, shutil, signal, sys, time, warnings
 
 from gif_overlay.helpers import make_note, panel_offset, parse_panels
 
@@ -22,7 +22,7 @@ CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~
                       "gif-overlay", "config.json")
 PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay.pid")
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
-                monitor=None, pixel=False, hidden=False, agents=True, agent_size=90,
+                monitor=None, pixel=False, hidden=False, agents=True, agent_size=64,
                 gifs_dir="~/gifs")
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
                                "settings.json")
@@ -75,7 +75,7 @@ p.add_argument("--pixel", action=argparse.BooleanOptionalAction,
                help="nearest-neighbour scaling (for pixel art)")
 p.add_argument("--agents", action=argparse.BooleanOptionalAction,
                help="a sprite per running Claude agent in the top-left corner")
-p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px)")
+p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px, default 64)")
 p.add_argument("--gifs-dir", help="folder the agent sprites are picked from (default ~/gifs)")
 g = p.add_mutually_exclusive_group()
 for name in COMMANDS:
@@ -99,15 +99,19 @@ def edit_claude_settings(change):
         sys.exit(f"can't read {CLAUDE_SETTINGS} ({e}); not touching it")
     if not isinstance(settings, dict):
         sys.exit(f"{CLAUDE_SETTINGS} isn't a JSON object; not touching it")
-    os.makedirs(os.path.dirname(CLAUDE_SETTINGS), exist_ok=True)
+    target = os.path.realpath(CLAUDE_SETTINGS)  # a dotfiles symlink stays a symlink
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     if text is not None:
-        with open(CLAUDE_SETTINGS + ".bak-gif-overlay", "w") as f:
+        with open(target + ".bak-gif-overlay", "w") as f:
             f.write(text)
-    tmp = CLAUDE_SETTINGS + ".tmp-gif-overlay"
+        shutil.copymode(target, target + ".bak-gif-overlay")
+    tmp = target + ".tmp-gif-overlay"
     with open(tmp, "w") as f:
-        json.dump(change(settings), f, indent=2)
+        json.dump(change(settings), f, indent=2, ensure_ascii=False)
         f.write("\n")
-    os.replace(tmp, CLAUDE_SETTINGS)
+    if text is not None:
+        shutil.copymode(target, tmp)  # it may hold secrets in "env": keep it private
+    os.replace(tmp, target)
 
 
 if args.install_hooks or args.uninstall_hooks:

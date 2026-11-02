@@ -74,6 +74,32 @@ def test_waiting_session_stays_after_stop():
     t.event(ev("Notification", notification_type="permission_prompt", message="hi"), 1)
     assert active_ids(t, 100) == ["s1"]
 
+def test_subagent_tools_dont_touch_main_state():
+    t = AgentTracker(idle_grace=4.0)
+    t.event(ev("UserPromptSubmit"), 0)
+    t.event(ev("SubagentStart", agent_id="bg"), 1)
+    t.event(ev("PreToolUse", tool_name="AskUserQuestion"), 2)
+    t.event(ev("PostToolUse", agent_id="bg"), 3)
+    assert t.active(3)[0].waiting == "has a question for you"
+    t.event(ev("PostToolUse"), 4)
+    t.event(ev("SubagentStop", agent_id="bg"), 5)
+    t.event(ev("Stop"), 6)
+    t.event(ev("PostToolUse", agent_id="late"), 7)
+    assert active_ids(t, 11) == []
+
+def test_stop_clears_waiting():
+    t = AgentTracker(idle_grace=4.0)
+    t.event(ev("PermissionRequest", tool_name="Bash"), 0)
+    t.event(ev("Stop"), 1)
+    assert active_ids(t, 6) == []
+
+def test_only_blocking_notifications_wait():
+    t = AgentTracker(idle_grace=4.0)
+    t.event(ev("Notification", notification_type="auth_success", message="ok"), 0)
+    assert active_ids(t, 0) == []
+    t.event(ev("Notification", notification_type="elicitation_dialog", message="pick one"), 1)
+    assert t.active(1)[0].waiting == "pick one"
+
 def test_idle_prompt_ignored():
     t = AgentTracker(idle_grace=4.0)
     t.event(ev("Stop"), 0)
@@ -152,13 +178,18 @@ def test_layout_tree_column():
     assert boxes(placements) == [
         ("sprite", "a", -1, 0, 0, 100, 100, 0),
         ("caption", "a", -1, 20, 102, 60, 14, 0),
-        ("sprite", "a", 0, 18, 120, 65, 65, 1),
-        ("sprite", "a", 1, 36, 189, 42, 42, 2),
-        ("sprite", "a", 2, 18, 235, 65, 65, 1),
-        ("sprite", "b", -1, 0, 312, 100, 100, 0),
-        ("caption", "b", -1, 20, 414, 60, 14, 0),
+        ("sprite", "a", 0, 18, 120, 55, 55, 1),
+        ("sprite", "a", 1, 36, 179, 30, 30, 2),
+        ("sprite", "a", 2, 18, 213, 55, 55, 1),
+        ("sprite", "b", -1, 0, 280, 100, 100, 0),
+        ("caption", "b", -1, 20, 382, 60, 14, 0),
     ]
-    assert (w, h) == (100, 428)
+    assert (w, h) == (100, 396)
+
+def test_layout_deep_levels_have_a_minimum_size():
+    placements, _, _ = layout([{"id": "a", "agents": [5], "waiting": False}], 100, square,
+                              no_bubble, caption)
+    assert placements[-1].h == 16
 
 def test_layout_overflow_label():
     placements, _, _ = layout([{"id": "a", "agents": [1] * 30, "waiting": False}], 100, square,
@@ -200,6 +231,42 @@ def test_hooks_remove_only_ours():
     settings = {"hooks": {"Stop": [{"hooks": [mine]}]}, "x": 1}
     assert remove_hooks(merge_hooks(settings)) == settings
     assert remove_hooks({"x": 1}) == {"x": 1}
+
+
+# ---------------------------------------------------------------- the hook script
+import subprocess, tempfile
+
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gif-overlay-hook")
+
+def run_hook(payload):
+    """Run gif-overlay-hook with a fake busctl that records what it would send."""
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "sent")
+        with open(os.path.join(d, "busctl"), "w") as f:
+            f.write(f'#!/bin/sh\nfor a; do last="$a"; done; printf %s "$last" > {out}\n')
+        os.chmod(os.path.join(d, "busctl"), 0o755)
+        r = subprocess.run(["sh", HOOK], input=payload.encode(), env={"PATH": d + ":/usr/bin:/bin"},
+                           timeout=10)
+        assert r.returncode == 0
+        return open(out).read() if os.path.exists(out) else None
+
+def test_hook_forwards_small_payloads_verbatim():
+    p = '{"session_id": "s1", "hook_event_name": "Stop", "cwd": "/x"}'
+    assert run_hook(p) == p
+
+def test_hook_shrinks_post_tool_use_and_keeps_agent_id():
+    import json
+    p = json.dumps({"session_id": "s1", "transcript_path": "/t", "agent_id": "ag-7",
+                    "hook_event_name": "PostToolUse", "tool_name": "Read",
+                    "tool_input": {"agent_id": "fake"}, "tool_response": "x" * 300000})
+    assert json.loads(run_hook(p)) == {"session_id": "s1", "agent_id": "ag-7",
+                                       "hook_event_name": "PostToolUse"}
+
+def test_hook_shrinks_huge_prompts():
+    import json
+    p = json.dumps({"session_id": "s1", "hook_event_name": "UserPromptSubmit",
+                    "prompt": "y" * 200000})
+    assert json.loads(run_hook(p)) == {"session_id": "s1", "hook_event_name": "UserPromptSubmit"}
 
 
 if __name__ == "__main__":

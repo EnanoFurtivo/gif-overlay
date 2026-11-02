@@ -8,6 +8,7 @@ mkdir -p "$data"
 cp -r gif_overlay "$data/"
 rm -rf "$data/gif_overlay/__pycache__"
 install -Dm755 gif-overlay "$HOME/.local/bin/gif-overlay"
+install -Dm755 gif-overlay-hook "$HOME/.local/bin/gif-overlay-hook"
 install -Dm644 gif-overlay.service "$HOME/.config/systemd/user/gif-overlay.service"
 systemctl --user daemon-reload
 if systemctl --user is-active --quiet gif-overlay; then

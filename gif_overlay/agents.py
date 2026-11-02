@@ -7,30 +7,28 @@ from collections import namedtuple
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------- hooks
-# Claude Code runs these on each event; busctl hands the JSON payload to the running
-# overlay and is a quick no-op when it isn't running.
-HOOK_MARKER = "local.GifOverlay AgentEvent"
-_BUSCTL = ("busctl --user --timeout=1 call local.GifOverlay /local/GifOverlay "
-           "local.GifOverlay AgentEvent s")
-EVENT_CMD = f'{_BUSCTL} "$(cat)" >/dev/null 2>&1 || true'
-# PostToolUse payloads carry whole tool outputs (too big for one argument): only forward
-# which session finished a tool, which is all the tracker needs.
-TOOL_DONE_CMD = (
-    "p=$(cat); sid=$(printf %s \"$p\" | head -c 600 | grep -o '\"session_id\": *\"[^\"]*\"' "
-    f"| head -n1); {_BUSCTL} \"{{$sid,\\\"hook_event_name\\\":\\\"PostToolUse\\\"}}\" "
-    ">/dev/null 2>&1 || true")
-HOOK_EVENTS = {  # event -> (matcher or None, command)
-    "SessionStart": (None, EVENT_CMD),
-    "SessionEnd": (None, EVENT_CMD),
-    "UserPromptSubmit": (None, EVENT_CMD),
-    "Stop": (None, EVENT_CMD),
-    "SubagentStart": (None, EVENT_CMD),
-    "SubagentStop": (None, EVENT_CMD),
-    "Notification": (None, EVENT_CMD),
-    "PermissionRequest": (None, EVENT_CMD),
-    "PreToolUse": ("AskUserQuestion|ExitPlanMode", EVENT_CMD),
-    "PostToolUse": ("*", TOOL_DONE_CMD),
+# Claude Code runs gif-overlay-hook (installed next to the launcher) on each event; it
+# hands the JSON payload to the running overlay over D-Bus, fire-and-forget.
+HOOK_MARKER = "gif-overlay-hook"
+OLD_MARKERS = ["local.GifOverlay AgentEvent"]  # inline commands of the first version
+HOOK_CMD = '"$HOME/.local/bin/gif-overlay-hook"'
+HOOK_EVENTS = {  # event -> matcher (None = every occurrence)
+    "SessionStart": None,
+    "SessionEnd": None,
+    "UserPromptSubmit": None,
+    "Stop": None,
+    "SubagentStart": None,
+    "SubagentStop": None,
+    "Notification": None,
+    "PermissionRequest": None,
+    "PreToolUse": "AskUserQuestion|ExitPlanMode",
+    "PostToolUse": "*",
 }
+
+
+def ours(hook):
+    command = hook.get("command", "") if isinstance(hook, dict) else ""
+    return any(marker in command for marker in [HOOK_MARKER] + OLD_MARKERS)
 
 
 def remove_hooks(settings):
@@ -42,7 +40,7 @@ def remove_hooks(settings):
     for event in list(hooks):
         groups = []
         for group in hooks[event]:
-            kept = [h for h in group.get("hooks", []) if HOOK_MARKER not in h.get("command", "")]
+            kept = [h for h in group.get("hooks", []) if not ours(h)]
             if kept:
                 groups.append({**group, "hooks": kept})
         if groups:
@@ -58,8 +56,8 @@ def merge_hooks(settings):
     """A copy of `settings` with our hook entries (replacing any older version of them)."""
     settings = remove_hooks(settings)
     hooks = settings.setdefault("hooks", {})
-    for event, (matcher, command) in HOOK_EVENTS.items():
-        group = {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+    for event, matcher in HOOK_EVENTS.items():
+        group = {"hooks": [{"type": "command", "command": HOOK_CMD, "timeout": 5}]}
         if matcher:
             group = {"matcher": matcher, **group}
         hooks.setdefault(event, []).append(group)
@@ -67,6 +65,7 @@ def merge_hooks(settings):
 
 
 # ---------------------------------------------------------------- tracker
+BLOCKING_NOTIFICATIONS = {"permission_prompt", "elicitation_dialog", None}
 WAITING_TOOLS = {"AskUserQuestion": "has a question for you",
                  "ExitPlanMode": "wants you to approve a plan"}
 
@@ -100,8 +99,8 @@ class AgentTracker:
         agent = payload.get("agent_id")
         if name in ("SubagentStart", "SubagentStop") and not isinstance(agent, str):
             return False
-        if name == "Notification" and payload.get("notification_type") == "idle_prompt":
-            return False  # "still waiting after 60s idle": every finished chat would light up
+        if name == "Notification" and payload.get("notification_type") not in BLOCKING_NOTIFICATIONS:
+            return False  # e.g. idle_prompt ("still idle after 60s"): every finished chat would light up
         if name == "PreToolUse" and payload.get("tool_name") not in WAITING_TOOLS:
             return False
         if name not in ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart",
@@ -118,8 +117,8 @@ class AgentTracker:
 
         if name == "UserPromptSubmit":
             s.working, s.waiting, s.stopped_at = True, None, None
-        elif name == "Stop":
-            s.working, s.stopped_at = False, now
+        elif name == "Stop":  # a turn can't end while it's blocked on the user
+            s.working, s.waiting, s.stopped_at = False, None, now
         elif name == "SubagentStart":
             parent = payload.get("parent_agent_id")
             s.agents[agent] = s.agents[parent] + 1 if parent in s.agents else 1
@@ -134,7 +133,7 @@ class AgentTracker:
             s.waiting = f"wants to use {tool}" if tool else "needs your permission"
         elif name == "PreToolUse":
             s.waiting = WAITING_TOOLS[payload["tool_name"]]
-        elif name == "PostToolUse":
+        elif name == "PostToolUse" and agent is None:  # subagents' tools say nothing about main
             s.working, s.waiting = True, None
         return True
 
@@ -189,7 +188,8 @@ def gif_for_level(levels, level, main_gif):
 
 # ---------------------------------------------------------------- layout
 Placement = namedtuple("Placement", "kind session_id index x y w h depth")
-DEPTH_RATIO, INDENT, V_GAP, SESSION_GAP, CAPTION_GAP, BUBBLE_GAP = 0.65, 18, 4, 12, 2, 8
+DEPTH_RATIO, MIN_SIZE = 0.55, 16  # each level is 55% of its parent, never under 16px
+INDENT, V_GAP, SESSION_GAP, CAPTION_GAP, BUBBLE_GAP = 18, 4, 12, 2, 8
 MAX_AGENTS, MORE_W, MORE_H = 12, 40, 20
 
 
@@ -219,7 +219,7 @@ def layout(rows, agent_size, aspect, bubble_size, caption_size):
             bubble_bottom = y
         cursor = bottom + V_GAP
         for index, depth in enumerate(row["agents"][:MAX_AGENTS]):
-            h = round(agent_size * DEPTH_RATIO ** depth)
+            h = max(MIN_SIZE, round(agent_size * DEPTH_RATIO ** depth))
             w = round(h * aspect(depth))
             placements.append(Placement("sprite", sid, index, INDENT * depth, cursor, w, h, depth))
             cursor += h + V_GAP
