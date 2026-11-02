@@ -1,16 +1,9 @@
-"""Tests for gif-overlay's pure helpers. Run: python -I tests/test_helpers.py
-
-Loads only the source above the options section, so no GTK window or argparse runs.
-"""
+"""Tests for gif-overlay's pure helpers. Run: python -I tests/test_helpers.py"""
 import os, sys, traceback
 
-SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gif-overlay")
-MARKER = "# ---------------------------------------------------------------- options"
-ns = {"__name__": "gif_overlay_helpers"}
-exec(open(SRC).read().split(MARKER)[0], ns)
-plain_text, display_seconds = ns["plain_text"], ns["display_seconds"]
-parse_panels, panel_offset, BubbleQueue = ns["parse_panels"], ns["panel_offset"], ns["BubbleQueue"]
-make_note = ns.get("make_note")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from gif_overlay.helpers import (BubbleQueue, display_seconds, make_note, panel_offset,
+                                 parse_panels, plain_text)
 
 
 def note(app, n=0, replaces=0):

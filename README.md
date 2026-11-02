@@ -27,10 +27,8 @@ sudo pacman -S gtk-layer-shell python-gobject python-cairo
 ## Install
 
 ```bash
-install -Dm755 gif-overlay ~/.local/bin/gif-overlay
-install -Dm644 gif-overlay.service ~/.config/systemd/user/gif-overlay.service
-gif-overlay ~/Pictures/your.gif --monitor 0    # first run: saves the settings, Ctrl+C to stop
-systemctl --user daemon-reload
+./install.sh                                    # package + launcher + systemd unit
+gif-overlay ~/Pictures/your.gif --monitor 0     # first run: saves the settings, Ctrl+C to stop
 systemctl --user enable --now gif-overlay.service
 ```
 
@@ -84,7 +82,7 @@ Flags given on the command line are saved and become the new defaults.
 ## Tests
 
 ```bash
-python -I tests/test_helpers.py
+python -I tests/test_helpers.py && python -I tests/test_agents.py
 ```
 
 ## License
