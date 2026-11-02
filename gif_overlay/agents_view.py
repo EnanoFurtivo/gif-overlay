@@ -12,6 +12,7 @@ SESSIONS_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expandu
 BUBBLE_MAX_W = 300
 CAPTION_MAX_W = 160
 CHAT_URL = "claude://code/needs-input?session={}"
+STATE_FILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay-agents.json")
 CAPTION_PAD_X, CAPTION_PAD_Y = 6, 2
 BADGE_OVERHANG = 8  # timer badges stick out of the tile corner by this much
 SMALL_TILE = 36     # tiles smaller than this get their badge beside them
@@ -76,6 +77,8 @@ class AgentsView:
     def __init__(self, app):
         self.app = app             # the gif_overlay.app module: cfg, monitor_geometry()...
         self.tracker = AgentTracker()
+        self.save_src = None
+        self.load_state()          # sessions seen before a restart, timers and all
         self.levels = {}           # level -> GIF path (level 1 = Claude sessions)
         self.gifs = {}             # path -> Gif, loaded on first use
         self.chats = {}            # Claude Code session id -> (desktop local id, title)
@@ -125,6 +128,7 @@ class AgentsView:
                 self.warned = True
             return
         if self.tracker.event(payload, time.monotonic()):
+            self.schedule_save()
             self.refresh()
 
     def tick(self):
@@ -149,6 +153,29 @@ class AgentsView:
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
         return self.chats.get(sid, (None, ""))
+
+    # -- remembering sessions across restarts (the runtime dir is wiped at logout/reboot)
+    def load_state(self):
+        try:
+            with open(STATE_FILE) as f:
+                self.tracker.load(json.load(f))
+        except (OSError, ValueError):
+            pass
+
+    def schedule_save(self):
+        if self.save_src is None:
+            self.save_src = GLib.timeout_add(1000, self.save)
+
+    def save(self):
+        self.save_src = None
+        tmp = STATE_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(self.tracker.dump(), f)
+            os.replace(tmp, STATE_FILE)
+        except OSError as e:
+            print("gif-overlay: couldn't save the agent state:", e, file=sys.stderr)
+        return False
 
     # -- layout
     def rows_key(self):

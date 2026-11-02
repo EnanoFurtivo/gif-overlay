@@ -4,7 +4,7 @@ Pure (no GTK); unit-tested in tests/test_agents.py.
 """
 import copy, os, re
 from collections import namedtuple
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 # ---------------------------------------------------------------- hooks
 # Claude Code runs gif-overlay-hook (installed next to the launcher) on each event; it
@@ -151,6 +151,18 @@ class AgentTracker:
                        if s.working or s.waiting or s.agents
                        or (s.stopped_at is not None and now - s.stopped_at < self.idle_grace)),
                       key=lambda s: s.first_seen)
+
+    def dump(self):
+        """JSON-able state (times are CLOCK_MONOTONIC: valid until the next reboot)."""
+        return {"sessions": [asdict(s) for s in self.sessions.values()]}
+
+    def load(self, data):
+        """Restore dump() output; anything unreadable just starts empty."""
+        try:
+            sessions = {d["id"]: SessionState(**d) for d in data["sessions"]}
+        except (KeyError, TypeError, AttributeError):
+            sessions = {}
+        self.sessions = sessions
 
     def tree(self, session):
         """[(agent id, depth)] with every subagent right under the one that spawned it."""

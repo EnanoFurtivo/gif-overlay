@@ -157,6 +157,30 @@ def test_tree_order_puts_children_under_parents():
     assert t.tree(s) == [("b", 1), ("e", 2), ("c", 2), ("d", 3)]
 
 
+# ---------------------------------------------------------------- persistence
+def test_tracker_survives_a_restart():
+    import json
+    t = AgentTracker()
+    t.event(ev("UserPromptSubmit", cwd="/x/proj"), 10)
+    t.event(ev("SubagentStart", agent_id="a"), 20)
+    t.event(ev("SubagentStart", agent_id="b", parent_agent_id="a"), 30)
+    t.event(ev("PreToolUse", sid="s2", tool_name="AskUserQuestion"), 40)
+    saved = json.loads(json.dumps(t.dump()))  # through the file format
+    t2 = AgentTracker()
+    t2.load(saved)
+    a, b = t2.active(50)
+    assert (a.id, a.first_seen, a.cwd, a.working) == ("s1", 10, "/x/proj", True)
+    assert a.agents == {"a": 1, "b": 2} and a.agent_started == {"a": 20, "b": 30}
+    assert t2.tree(a) == [("a", 1), ("b", 2)]
+    assert (b.id, b.waiting) == ("s2", "has a question for you")
+
+def test_tracker_load_ignores_garbage():
+    t = AgentTracker()
+    for junk in [None, {}, {"sessions": "x"}, {"sessions": [{"id": "s"}]}, []]:
+        t.load(junk)
+        assert t.active(0) == []
+
+
 # ---------------------------------------------------------------- timers
 def test_format_elapsed():
     assert [format_elapsed(t) for t in (0, 59.9, 61, 3599, 3600, 3725)] == \

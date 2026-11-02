@@ -583,6 +583,7 @@ try:
     Gtk.main()
 finally:
     set_dnd(False)
+    agents.save()
     try:
         unload_kwin_script()
     except GLib.Error:
