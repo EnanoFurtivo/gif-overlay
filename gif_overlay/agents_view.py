@@ -2,9 +2,9 @@
 import glob, json, math, os, re, sys, time
 
 from gif_overlay.agents import INDENT, AgentTracker, gif_for_level, layout, level_gifs
-from gif_overlay.bubble import STROKE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
+from gif_overlay.bubble import EDGE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
-                                 PangoCairo, Tween, cairo, clear_bg)
+                                 PangoCairo, Tween, cairo, clear_bg, neon_stroke)
 
 SESSIONS_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                             "Claude", "claude-code-sessions")
@@ -179,7 +179,7 @@ class AgentsView:
 
         def bubble_size(sid):
             bw, bh = bubble_box(*self.bubbles[sid], True, max_w=BUBBLE_MAX_W)
-            return bw + TAIL_H + 2 * STROKE, bh + 2 * STROKE
+            return bw + TAIL_H + 2 * EDGE, bh + 2 * EDGE
 
         rows = [{"id": s.id, "agents": [d for _a, d in self.tracker.tree(s)],
                  "waiting": bool(s.waiting)} for s in sessions]
@@ -190,6 +190,7 @@ class AgentsView:
         for path in used:
             self.gif(path).start()
 
+        w, h = w + 2 * EDGE, h + 2 * EDGE  # everything is drawn EDGE in, so glows fit
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         if not self.win.get_visible():
@@ -206,7 +207,7 @@ class AgentsView:
         region = cairo.Region()
         for p in self.placements:
             if p.kind == "bubble":  # only bubbles take clicks; sprites are click-through
-                region.union(cairo.RectangleInt(p.x, p.y, p.w, p.h))
+                region.union(cairo.RectangleInt(EDGE + p.x, EDGE + p.y, p.w, p.h))
         self.win.get_window().input_shape_combine_region(region, 0, 0)
         self.area.queue_draw()
 
@@ -227,7 +228,7 @@ class AgentsView:
         m = self.app.cfg["margin"]
         w = max(p.x + p.w for p in boxes)
         h = max(p.y + p.h for p in boxes)
-        return [f"agents:{mx + m},{my + m},{w},{h}"]
+        return [f"agents:{mx + m + EDGE},{my + m + EDGE},{w},{h}"]
 
     def hover(self, _name, on):
         self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
@@ -236,10 +237,6 @@ class AgentsView:
     def draw_tree_lines(self, cr):
         """File-tree elbows from each sprite down to the subagents it spawned."""
         cr.push_group()
-        cr.set_source_rgba(1, 1, 1, 1)
-        cr.set_line_width(2)
-        cr.set_line_cap(cairo.LINE_CAP_ROUND)
-        cr.set_line_join(cairo.LINE_JOIN_ROUND)
         for i, p in enumerate(self.placements):
             if p.kind != "sprite" or p.index < 0:
                 continue
@@ -254,9 +251,9 @@ class AgentsView:
             cr.move_to(trunk, top + 2)
             cr.line_to(trunk, mid)
             cr.line_to(p.x - 2, mid)
-        cr.stroke()
+        neon_stroke(cr)
         cr.pop_group_to_source()
-        cr.paint_with_alpha(0.35 * self.fade.value)
+        cr.paint_with_alpha(self.fade.value)
 
     def draw_tile(self, cr, p):
         """Dark glass rounded tile with the GIF inset in it."""
@@ -267,11 +264,9 @@ class AgentsView:
         cr.arc(p.x + r, p.y + p.h - r, r, math.pi / 2, math.pi)
         cr.arc(p.x + r, p.y + r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
-        cr.set_source_rgba(0.07, 0.08, 0.11, 0.86 * a)
+        cr.set_source_rgba(0.043, 0.055, 0.078, a)
         cr.fill_preserve()
-        cr.set_source_rgba(1, 1, 1, 0.12 * a)
-        cr.set_line_width(1)
-        cr.stroke()
+        neon_stroke(cr, a)
         pad = max(2, round(p.h * 0.08))
         surf = self.gif(self.path_for(p.depth)).surface(max(1, p.w - 2 * pad),
                                                         max(1, p.h - 2 * pad))
@@ -279,6 +274,7 @@ class AgentsView:
         cr.paint_with_alpha(a)
 
     def draw(self, _w, cr):
+        cr.translate(EDGE, EDGE)
         self.draw_tree_lines(cr)
         for p in self.placements:
             if p.kind == "sprite":
@@ -299,16 +295,17 @@ class AgentsView:
                 layout = self.area.create_pango_layout(f"+{p.index}")
                 layout.set_font_description(Pango.FontDescription.from_string("Sans Bold 10"))
                 tw, th = layout.get_pixel_size()
-                cr.set_source_rgba(0.1, 0.1, 0.1, 0.7 * self.fade.value)
+                cr.set_source_rgba(0.043, 0.055, 0.078, self.fade.value)
                 cr.rectangle(p.x, p.y, p.w, p.h)
-                cr.fill()
+                cr.fill_preserve()
+                neon_stroke(cr, self.fade.value)
                 cr.set_source_rgba(1, 1, 1, self.fade.value)
                 cr.move_to(p.x + (p.w - tw) / 2, p.y + (p.h - th) / 2)
                 PangoCairo.show_layout(cr, layout)
             elif p.kind == "bubble":
                 header, speech = self.bubbles[p.session_id]
-                x0, y0 = p.x + STROKE + TAIL_H, p.y + STROKE
-                bw, bh = p.w - TAIL_H - 2 * STROKE, p.h - 2 * STROKE
+                x0, y0 = p.x + EDGE + TAIL_H, p.y + EDGE
+                bw, bh = p.w - TAIL_H - 2 * EDGE, p.h - 2 * EDGE
                 session_sprite = next(q for q in self.placements
                                       if q.kind == "sprite" and q.session_id == p.session_id
                                       and q.index == -1)
@@ -318,7 +315,8 @@ class AgentsView:
 
     def on_click(self, _w, event):
         for p in self.placements:
-            if p.kind == "bubble" and p.x <= event.x < p.x + p.w and p.y <= event.y < p.y + p.h:
+            x, y = event.x - EDGE, event.y - EDGE
+            if p.kind == "bubble" and p.x <= x < p.x + p.w and p.y <= y < p.y + p.h:
                 local, _title = self.chat(p.session_id)
                 if local and event.button == 1:
                     try:

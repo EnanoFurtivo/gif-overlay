@@ -29,7 +29,7 @@ Sprites come from `~/gifs` (`--gifs-dir`): `level1.gif` for Claude sessions, `le
 for their subagents, `level3.gif` for theirs, and so on. A level without its own file
 reuses the deepest one above it. Each session's sprite carries its chat name; hovering
 anywhere over the column fades it. New hooks apply to sessions started after installing.
-`--agent-size` sets the session sprite height (default 64), `--no-agents` turns it off.
+`--agent-size` sets the session sprite height (default 54), `--no-agents` turns it off.
 
 Agents started from a terminal show up too, but their bubble can't open a chat.
 With no `levelN` files at all, every level uses the main GIF. The hooks need `busctl`
@@ -80,7 +80,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--pixel` / `--no-pixel` | off | nearest-neighbour scaling for pixel art |
 | `--bubbles` / `--no-bubbles` | on | notifications as speech bubbles, or keep Plasma's popups |
 | `--agents` / `--no-agents` | on | Claude agent sprites in the top-left corner |
-| `--agent-size` | 64 | height of a session's sprite (px) |
+| `--agent-size` | 54 | height of a session's sprite (px) |
 | `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |
 
 Flags given on the command line are saved and become the new defaults.

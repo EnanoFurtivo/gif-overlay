@@ -43,5 +43,25 @@ def clear_bg(_w, cr):
     return False
 
 
+NEON = (0.0, 0.94, 1.0)  # cyan
+
+def neon_stroke(cr, alpha=1.0, width=1.6):
+    """Stroke the current path as a cyan neon tube: soft glow passes, then a bright core."""
+    path = cr.copy_path()
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    for glow_width, glow_alpha in ((9, 0.07), (6, 0.14), (3.5, 0.32)):
+        cr.new_path()
+        cr.append_path(path)
+        cr.set_source_rgba(*NEON, glow_alpha * alpha)
+        cr.set_line_width(glow_width)
+        cr.stroke()
+    cr.new_path()
+    cr.append_path(path)
+    cr.set_source_rgba(0.72, 1.0, 1.0, alpha)
+    cr.set_line_width(width)
+    cr.stroke()
+
+
 def hex_rgb(color):
     return tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)) + (1.0,)

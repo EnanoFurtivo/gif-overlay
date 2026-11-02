@@ -2,11 +2,12 @@
 import math, time
 
 from gif_overlay.gtkbits import (Gdk, Gio, GLib, Gtk, GtkLayerShell, Pango, PangoCairo,
-                                 Tween, cairo, clear_bg, hex_rgb)
+                                 Tween, cairo, clear_bg, hex_rgb, neon_stroke)
 from gif_overlay.helpers import BubbleQueue, display_seconds
 
-MAX_W, MIN_W, PAD, RADIUS, TAIL_H, STROKE = 340, 140, 14, 14, 16, 2
-FILL, LINE, TEXT, MUTED = "#fffef5", "#2b2b2b", "#1e1e1e", "#6b6b6b"
+MAX_W, MIN_W, PAD, RADIUS, TAIL_H = 340, 140, 14, 14, 16
+EDGE = 6  # room around a shape for its neon glow
+FILL, TEXT, MUTED = "#0b0e14", "#e8fbff", "#5fe9f5"
 
 
 def launch_app(note):
@@ -27,7 +28,7 @@ def launch_app(note):
 
 class Bubble:
     """The speech bubble above the GIF: shows queued notes one at a time, typed out."""
-    TAIL_H, STROKE = TAIL_H, STROKE
+    TAIL_H, EDGE = TAIL_H, EDGE
     CPS = 80          # typing speed, characters per second
     GAP_MS = 400      # pause between two bubbles
 
@@ -98,7 +99,7 @@ class Bubble:
         self.typing_done = False
         self.hovered = False  # a fresh window: no leave event will come for the old one
         self.box = bubble_box(*self.layouts(), bool(note["app"]))
-        w, h = self.box[0] + 2 * self.STROKE, self.box[1] + self.TAIL_H + 2 * self.STROKE
+        w, h = self.box[0] + 2 * self.EDGE, self.box[1] + self.TAIL_H + 2 * self.EDGE
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         display = Gdk.Display.get_default()
@@ -110,7 +111,7 @@ class Bubble:
         self.place()
         self.win.show_all()
         self.win.get_window().input_shape_combine_region(cairo.Region(cairo.RectangleInt(
-            self.STROKE, self.STROKE, self.box[0], self.box[1])), 0, 0)
+            self.EDGE, self.EDGE, self.box[0], self.box[1])), 0, 0)
         self.fade.value = 0.0
         self.area.set_opacity(0.0)
         self.fade.to(1.0)
@@ -194,8 +195,8 @@ class Bubble:
             return True
         bw, bh = self.box
         # tail points at the middle of the GIF (the bubble's right edge is the GIF's)
-        tx = STROKE + bw - min(max(self.app.size()[0] * 0.5, 24), bw - 24)
-        paint_bubble(cr, STROKE, STROKE, bw, bh, ("down", tx), *self.layouts(self.typed),
+        tx = EDGE + bw - min(max(self.app.size()[0] * 0.5, 24), bw - 24)
+        paint_bubble(cr, EDGE, EDGE, bw, bh, ("down", tx), *self.layouts(self.typed),
                      bool(self.note["app"]))
         return True
 
@@ -252,10 +253,7 @@ def paint_bubble(cr, x0, y0, bw, bh, tail, header, speech, has_header):
     cr.close_path()
     cr.set_source_rgba(*hex_rgb(FILL))
     cr.fill_preserve()
-    cr.set_source_rgba(*hex_rgb(LINE))
-    cr.set_line_width(STROKE)
-    cr.set_line_join(cairo.LINE_JOIN_ROUND)
-    cr.stroke()
+    neon_stroke(cr)
     y = y0 + PAD
     cr.set_source_rgba(*hex_rgb(TEXT))
     if has_header:
