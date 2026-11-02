@@ -5,6 +5,9 @@ from gif_overlay.gtkbits import (Gdk, Gio, GLib, Gtk, GtkLayerShell, Pango, Pang
                                  Tween, cairo, clear_bg, hex_rgb)
 from gif_overlay.helpers import BubbleQueue, display_seconds
 
+MAX_W, MIN_W, PAD, RADIUS, TAIL_H, STROKE = 340, 140, 14, 14, 16, 2
+FILL, LINE, TEXT, MUTED = "#fffef5", "#2b2b2b", "#1e1e1e", "#6b6b6b"
+
 
 def launch_app(note):
     """Bring up the app that sent a notification (single-instance apps just raise)."""
@@ -24,10 +27,9 @@ def launch_app(note):
 
 class Bubble:
     """The speech bubble above the GIF: shows queued notes one at a time, typed out."""
-    MAX_W, MIN_W, PAD, RADIUS, TAIL_H, STROKE = 340, 140, 14, 14, 16, 2
+    TAIL_H, STROKE = TAIL_H, STROKE
     CPS = 80          # typing speed, characters per second
     GAP_MS = 400      # pause between two bubbles
-    FILL, LINE, TEXT, MUTED = "#fffef5", "#2b2b2b", "#1e1e1e", "#6b6b6b"
 
     def __init__(self, app):
         self.app = app             # the gif_overlay.app module: cfg, win, size()...
@@ -86,26 +88,8 @@ class Bubble:
 
     # -- text
     def layouts(self, typed=None):
-        """(header, speech) Pango layouts; `typed` limits how much speech is revealed."""
-        note, esc = self.note, lambda s: GLib.markup_escape_text(s, -1)
-        header = self.area.create_pango_layout("")
-        header.set_font_description(Pango.FontDescription.from_string("Sans Bold 8"))
-        header.set_markup(f"<span foreground='{self.MUTED}'>{esc(note['app'])}</span>", -1)
-        summary, body = note["summary"], note["body"]
-        n = len(summary) + len(body) if typed is None else int(typed)
-        parts = []
-        if summary:
-            parts.append(f"<b>{esc(summary[:n])}</b>")
-        if body and n > len(summary):
-            parts.append(esc(body[:n - len(summary)]))
-        speech = self.area.create_pango_layout("")
-        speech.set_font_description(Pango.FontDescription.from_string("Sans 10"))
-        speech.set_width((self.MAX_W - 2 * self.PAD) * Pango.SCALE)
-        speech.set_wrap(Pango.WrapMode.WORD_CHAR)
-        speech.set_height(-8)  # at most 8 lines, then "…"
-        speech.set_ellipsize(Pango.EllipsizeMode.END)
-        speech.set_markup("\n".join(parts), -1)
-        return header, speech
+        note = self.note
+        return bubble_layouts(self.area, note["app"], note["summary"], note["body"], typed)
 
     # -- showing one note
     def show(self, note):
@@ -113,11 +97,7 @@ class Bubble:
         self.note, self.typed, self.display_from = note, 0.0, None
         self.typing_done = False
         self.hovered = False  # a fresh window: no leave event will come for the old one
-        header, speech = self.layouts()
-        (hw, hh), (sw, sh) = header.get_pixel_size(), speech.get_pixel_size()
-        hh = hh + 2 if note["app"] else 0
-        self.box = (min(self.MAX_W, max(self.MIN_W, max(hw, sw) + 2 * self.PAD)),
-                    hh + sh + 2 * self.PAD)
+        self.box = bubble_box(*self.layouts(), bool(note["app"]))
         w, h = self.box[0] + 2 * self.STROKE, self.box[1] + self.TAIL_H + 2 * self.STROKE
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
@@ -212,33 +192,73 @@ class Bubble:
     def draw(self, _w, cr):
         if not self.note:
             return True
-        s, r = self.STROKE, self.RADIUS
         bw, bh = self.box
-        x0, y0, x1, y1 = s, s, s + bw, s + bh
         # tail points at the middle of the GIF (the bubble's right edge is the GIF's)
-        tx = x1 - min(max(self.app.size()[0] * 0.5, 24), bw - 24)
-        cr.new_sub_path()
-        cr.arc(x1 - r, y0 + r, r, -math.pi / 2, 0)
-        cr.arc(x1 - r, y1 - r, r, 0, math.pi / 2)
-        cr.line_to(tx + 9, y1)
-        cr.line_to(tx + 4, y1 + self.TAIL_H)
-        cr.line_to(tx - 9, y1)
-        cr.arc(x0 + r, y1 - r, r, math.pi / 2, math.pi)
-        cr.arc(x0 + r, y0 + r, r, math.pi, 3 * math.pi / 2)
-        cr.close_path()
-        cr.set_source_rgba(*hex_rgb(self.FILL))
-        cr.fill_preserve()
-        cr.set_source_rgba(*hex_rgb(self.LINE))
-        cr.set_line_width(s)
-        cr.set_line_join(cairo.LINE_JOIN_ROUND)
-        cr.stroke()
-        header, speech = self.layouts(self.typed)
-        y = y0 + self.PAD
-        cr.set_source_rgba(*hex_rgb(self.TEXT))
-        if self.note["app"]:
-            cr.move_to(x0 + self.PAD, y)
-            PangoCairo.show_layout(cr, header)
-            y += header.get_pixel_size()[1] + 2
-        cr.move_to(x0 + self.PAD, y)
-        PangoCairo.show_layout(cr, speech)
+        tx = STROKE + bw - min(max(self.app.size()[0] * 0.5, 24), bw - 24)
+        paint_bubble(cr, STROKE, STROKE, bw, bh, ("down", tx), *self.layouts(self.typed),
+                     bool(self.note["app"]))
         return True
+
+
+# ---------------------------------------------------------------- shared bubble drawing
+def bubble_layouts(widget, header_text, summary, body, typed=None, max_w=MAX_W):
+    """(header, speech) Pango layouts; `typed` limits how much of the speech is revealed."""
+    esc = lambda s: GLib.markup_escape_text(s, -1)
+    header = widget.create_pango_layout("")
+    header.set_font_description(Pango.FontDescription.from_string("Sans Bold 8"))
+    header.set_markup(f"<span foreground='{MUTED}'>{esc(header_text)}</span>", -1)
+    n = len(summary) + len(body) if typed is None else int(typed)
+    parts = []
+    if summary:
+        parts.append(f"<b>{esc(summary[:n])}</b>")
+    if body and n > len(summary):
+        parts.append(esc(body[:n - len(summary)]))
+    speech = widget.create_pango_layout("")
+    speech.set_font_description(Pango.FontDescription.from_string("Sans 10"))
+    speech.set_width((max_w - 2 * PAD) * Pango.SCALE)
+    speech.set_wrap(Pango.WrapMode.WORD_CHAR)
+    speech.set_height(-8)  # at most 8 lines, then "…"
+    speech.set_ellipsize(Pango.EllipsizeMode.END)
+    speech.set_markup("\n".join(parts), -1)
+    return header, speech
+
+
+def bubble_box(header, speech, has_header, max_w=MAX_W):
+    """(w, h) of the bubble body for these layouts (no tail, no stroke room)."""
+    (hw, hh), (sw, sh) = header.get_pixel_size(), speech.get_pixel_size()
+    hh = hh + 2 if has_header else 0
+    return min(max_w, max(MIN_W, max(hw, sw) + 2 * PAD)), hh + sh + 2 * PAD
+
+
+def paint_bubble(cr, x0, y0, bw, bh, tail, header, speech, has_header):
+    """Bubble body at (x0, y0) sized (bw, bh); tail = ("down", x) or ("left", y)."""
+    r, (side, at) = RADIUS, tail
+    x1, y1 = x0 + bw, y0 + bh
+    cr.new_sub_path()
+    cr.arc(x1 - r, y0 + r, r, -math.pi / 2, 0)
+    cr.arc(x1 - r, y1 - r, r, 0, math.pi / 2)
+    if side == "down":
+        cr.line_to(at + 9, y1)
+        cr.line_to(at + 4, y1 + TAIL_H)
+        cr.line_to(at - 9, y1)
+    cr.arc(x0 + r, y1 - r, r, math.pi / 2, math.pi)
+    if side == "left":
+        cr.line_to(x0, at + 9)
+        cr.line_to(x0 - TAIL_H, at + 2)
+        cr.line_to(x0, at - 9)
+    cr.arc(x0 + r, y0 + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+    cr.set_source_rgba(*hex_rgb(FILL))
+    cr.fill_preserve()
+    cr.set_source_rgba(*hex_rgb(LINE))
+    cr.set_line_width(STROKE)
+    cr.set_line_join(cairo.LINE_JOIN_ROUND)
+    cr.stroke()
+    y = y0 + PAD
+    cr.set_source_rgba(*hex_rgb(TEXT))
+    if has_header:
+        cr.move_to(x0 + PAD, y)
+        PangoCairo.show_layout(cr, header)
+        y += header.get_pixel_size()[1] + 2
+    cr.move_to(x0 + PAD, y)
+    PangoCairo.show_layout(cr, speech)

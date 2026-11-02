@@ -22,7 +22,10 @@ CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~
                       "gif-overlay", "config.json")
 PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay.pid")
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
-                monitor=None, pixel=False, hidden=False)
+                monitor=None, pixel=False, hidden=False, agents=True, agent_size=90,
+                gifs_dir="~/gifs")
+CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                               "settings.json")
 # GLib.unix_signal_add only supports HUP, INT, TERM, USR1, USR2 and WINCH
 COMMANDS = {"bigger": signal.SIGUSR1, "smaller": signal.SIGUSR2, "reset_size": signal.SIGWINCH,
             "toggle": signal.SIGHUP, "stop": signal.SIGTERM}
@@ -70,11 +73,49 @@ p.add_argument("--monitor", help="monitor index (0, 1, 2...) or part of its make
                                   "e.g. ASUS (-1 = let KWin pick)")
 p.add_argument("--pixel", action=argparse.BooleanOptionalAction,
                help="nearest-neighbour scaling (for pixel art)")
+p.add_argument("--agents", action=argparse.BooleanOptionalAction,
+               help="a sprite per running Claude agent in the top-left corner")
+p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px)")
+p.add_argument("--gifs-dir", help="folder the agent sprites are picked from (default ~/gifs)")
 g = p.add_mutually_exclusive_group()
 for name in COMMANDS:
     g.add_argument("--" + name.replace("_", "-"), action="store_true",
                    help="tell the running instance to " + name.replace("_", " "))
+g.add_argument("--install-hooks", action="store_true",
+               help="add the Claude Code hooks that feed the agent sprites")
+g.add_argument("--uninstall-hooks", action="store_true", help="remove those hooks again")
 args = p.parse_args()
+
+
+def edit_claude_settings(change):
+    """Apply change(settings) -> settings to Claude Code's settings.json, keeping a backup."""
+    try:
+        with open(CLAUDE_SETTINGS) as f:
+            text = f.read()
+        settings = json.loads(text)
+    except FileNotFoundError:
+        text, settings = None, {}
+    except (OSError, ValueError) as e:
+        sys.exit(f"can't read {CLAUDE_SETTINGS} ({e}); not touching it")
+    if not isinstance(settings, dict):
+        sys.exit(f"{CLAUDE_SETTINGS} isn't a JSON object; not touching it")
+    os.makedirs(os.path.dirname(CLAUDE_SETTINGS), exist_ok=True)
+    if text is not None:
+        with open(CLAUDE_SETTINGS + ".bak-gif-overlay", "w") as f:
+            f.write(text)
+    tmp = CLAUDE_SETTINGS + ".tmp-gif-overlay"
+    with open(tmp, "w") as f:
+        json.dump(change(settings), f, indent=2)
+        f.write("\n")
+    os.replace(tmp, CLAUDE_SETTINGS)
+
+
+if args.install_hooks or args.uninstall_hooks:
+    from gif_overlay.agents import merge_hooks, remove_hooks
+    edit_claude_settings(merge_hooks if args.install_hooks else remove_hooks)
+    print(("installed" if args.install_hooks else "removed"), "gif-overlay hooks in",
+          CLAUDE_SETTINGS, "(backup: settings.json.bak-gif-overlay)")
+    sys.exit(0)
 
 for name, sig in COMMANDS.items():
     if getattr(args, name):
@@ -105,6 +146,7 @@ save_config(cfg)
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Tween, cairo,
                                  clear_bg)
 from gif_overlay.bubble import Bubble
+from gif_overlay.agents_view import AgentsView
 
 
 # ---------------------------------------------------------------- window
@@ -258,29 +300,33 @@ OLD_KWIN_SCRIPTS = ["gif-overlay-hover"]
 KWIN_JS = """// loaded at runtime by gif-overlay: tells it when the cursor is over it
 // and which panels are visible
 const SVC = "@NAME@", PATH = "@PATH@", IFACE = "@IFACE@";
-let rect = null, rectAt = 0, askedAt = 0, inside = false;
+let rects = [], rectAt = 0, askedAt = 0, inside = new Set();
 const timer = new QTimer();
 timer.interval = 300;
 
+// rects: [{name, x, y, w, h}] — the main GIF and every agent sprite
 function evaluate() {
     const p = workspace.cursorPos;
-    const now = !!rect && p.x >= rect[0] && p.x < rect[0] + rect[2]
-                       && p.y >= rect[1] && p.y < rect[1] + rect[3];
-    if (now !== inside) {
-        inside = now;
-        callDBus(SVC, PATH, IFACE, "Hover", inside);
-        if (inside) timer.start(); else timer.stop();
-    }
+    const now = new Set(rects.filter(r => p.x >= r.x && p.x < r.x + r.w
+                                          && p.y >= r.y && p.y < r.y + r.h).map(r => r.name));
+    for (const name of inside) if (!now.has(name)) callDBus(SVC, PATH, IFACE, "Hover", name, false);
+    for (const name of now) if (!inside.has(name)) callDBus(SVC, PATH, IFACE, "Hover", name, true);
+    inside = now;
+    if (inside.size) timer.start(); else timer.stop();
 }
 
-// the rect changes when resized / hidden / docked, so refresh it every 250ms at most
+// the rects change when resized / hidden / docked / agents come and go,
+// so refresh them every 250ms at most
 function check() {
     const t = Date.now();
     if (t - rectAt < 250) return evaluate();
-    if (t - askedAt < 1000) return;  // a Rect() call is already in flight
+    if (t - askedAt < 1000) return;  // a Rects() call is already in flight
     askedAt = t;
-    callDBus(SVC, PATH, IFACE, "Rect", function (r) {
-        rect = String(r).split(",").map(Number);
+    callDBus(SVC, PATH, IFACE, "Rects", function (r) {
+        rects = String(r).split(";").filter(s => s).map(s => {
+            const i = s.lastIndexOf(":"), v = s.slice(i + 1).split(",").map(Number);
+            return {name: s.slice(0, i), x: v[0], y: v[1], w: v[2], h: v[3]};
+        });
         rectAt = Date.now();
         askedAt = 0;
         evaluate();
@@ -313,31 +359,43 @@ workspace.windowRemoved.connect(sendPanels);
 sendPanels();
 """
 BUS_XML = f"""<node><interface name="{BUS_IFACE}">
-  <method name="Hover"><arg type="b" direction="in"/></method>
-  <method name="Rect"><arg type="s" direction="out"/></method>
+  <method name="Hover"><arg type="s" direction="in"/><arg type="b" direction="in"/></method>
+  <method name="Rects"><arg type="s" direction="out"/></method>
   <method name="Panels"><arg type="s" direction="in"/></method>
+  <method name="AgentEvent"><arg type="s" direction="in"/></method>
 </interface></node>"""
 opacity = Tween(1.0, area.set_opacity, duration=0.20)
 
-def screen_rect():
-    """'x,y,w,h' of the GIF in KWin's (logical, global) coordinates."""
+def screen_rects():
+    """'name:x,y,w,h;...' of the main GIF and the agent sprites, in KWin's coordinates."""
     gdkwin = win.get_window()
     if cfg["hidden"] or not gdkwin:
-        return "0,0,0,0"
+        return ""
     g = Gdk.Display.get_default().get_monitor_at_window(gdkwin).get_geometry()
     w, h = size()
-    return f"{g.x + g.width - cfg['margin'] - w},{g.y + g.height - bottom_margin() - h},{w},{h}"
+    main = f"main:{g.x + g.width - cfg['margin'] - w},{g.y + g.height - bottom_margin() - h},{w},{h}"
+    return ";".join([main] + agents.rects())
 
 def on_bus_call(_conn, _sender, _path, _iface, method, params, invocation):
-    if method == "Hover":
-        opacity.to(cfg["hover_opacity"] if params.unpack()[0] else 1.0)
-        invocation.return_value(None)
-    elif method == "Panels":
-        panels[:] = parse_panels(params.unpack()[0])
-        update_dock()
-        invocation.return_value(None)
-    else:
-        invocation.return_value(GLib.Variant("(s)", (screen_rect(),)))
+    try:
+        if method == "Hover":
+            name, on = params.unpack()
+            if name == "main":
+                opacity.to(cfg["hover_opacity"] if on else 1.0)
+            else:
+                agents.hover(name, on)
+        elif method == "Panels":
+            panels[:] = parse_panels(params.unpack()[0])
+            update_dock()
+        elif method == "AgentEvent":
+            agents.event(params.unpack()[0])
+        else:
+            invocation.return_value(GLib.Variant("(s)", (screen_rects(),)))
+            return
+    except Exception as e:  # a bad call must still get an answer
+        invocation.return_dbus_error("local.GifOverlay.Error", str(e))
+        return
+    invocation.return_value(None)
 
 bus = Gio.bus_get_sync(Gio.BusType.SESSION)
 bus.register_object(BUS_PATH, Gio.DBusNodeInfo.new_for_xml(BUS_XML).interfaces[0],
@@ -449,13 +507,20 @@ def set_dnd(on):
         print("gif-overlay: couldn't switch Plasma's Do Not Disturb:", e.message,
               file=sys.stderr)
 
+def from_claude(note):
+    return note["entry"] == "com.anthropic.Claude" or note["app"].lower() == "claude"
+
 def on_notification(note):
-    if not cfg["hidden"] and cfg["bubbles"] and listening:
-        bubble.enqueue(note)
+    if cfg["hidden"] or not cfg["bubbles"] or not listening:
+        return False
+    if cfg["agents"] and from_claude(note) and agents.tracker.any_waiting(time.monotonic()):
+        return False  # the agent sprite's own bubble already says it needs you
+    bubble.enqueue(note)
     return False
 
 
 bubble = Bubble(sys.modules[__name__])
+agents = AgentsView(sys.modules[__name__])
 
 
 # ---------------------------------------------------------------- show / hide / quit
@@ -464,10 +529,12 @@ def show():
     set_clickthrough()
     update_dock()
     set_dnd(True)
+    agents.refresh()
 
 def hide():
     win.hide()
     bubble.clear()
+    agents.hide()
     set_dnd(False)  # hidden: Plasma shows its own popups again
 
 def toggle():
