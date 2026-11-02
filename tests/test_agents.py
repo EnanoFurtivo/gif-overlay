@@ -84,8 +84,19 @@ def test_subagent_tools_dont_touch_main_state():
     t.event(ev("PostToolUse"), 4)
     t.event(ev("SubagentStop", agent_id="bg"), 5)
     t.event(ev("Stop"), 6)
-    t.event(ev("PostToolUse", agent_id="late"), 7)
     assert active_ids(t, 11) == []
+
+def test_tools_from_an_unseen_subagent_reveal_it():
+    # the overlay started listening after the turn (and its subagents) began: the only
+    # sign of life is subagents' tool calls, which must still put the session on screen
+    t = AgentTracker(idle_grace=4.0)
+    t.event(ev("PostToolUse", agent_id="bg"), 100)
+    s = t.active(100)[0]
+    assert s.agents == {"bg": 1} and s.agent_started == {"bg": 100} and not s.working
+    t.event(ev("PostToolUse", agent_id="bg"), 101)
+    assert s.agent_started == {"bg": 100}
+    t.event(ev("SubagentStop", agent_id="bg"), 200)
+    assert active_ids(t, 210) == []
 
 def test_stop_clears_waiting():
     t = AgentTracker(idle_grace=4.0)

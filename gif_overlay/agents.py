@@ -138,6 +138,9 @@ class AgentTracker:
             s.waiting = WAITING_TOOLS[payload["tool_name"]]
         elif name == "PostToolUse" and agent is None:  # subagents' tools say nothing about main
             s.working, s.waiting = True, None
+        elif name == "PostToolUse" and agent not in s.agents:
+            # a subagent we never saw start (we began listening after it did): it's running
+            s.agents[agent], s.parents[agent], s.agent_started[agent] = 1, None, now
         return True
 
     def active(self, now):
