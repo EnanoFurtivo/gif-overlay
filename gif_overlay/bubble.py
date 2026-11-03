@@ -1,7 +1,7 @@
 """The main GIF's speech bubble: notifications shown one at a time, typed out."""
 import math, time
 
-from gif_overlay.gtkbits import (Gdk, Gio, GLib, Gtk, GtkLayerShell, Pango, PangoCairo,
+from gif_overlay.gtkbits import (Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo,
                                  Tween, cairo, clear_bg, hex_rgb, neon_stroke)
 from gif_overlay.helpers import BubbleQueue, display_seconds
 
@@ -9,22 +9,6 @@ MAX_W, MIN_W, PAD, RADIUS, TAIL_H = 340, 140, 14, 14, 16
 EDGE = 6  # room around a shape for its neon glow
 HEAD_X, HEAD_Y = 0.62, 0.78  # main bubble's bottom-right corner, as fractions of the GIF
 FILL, TEXT, MUTED = "#0b0e14", "#e8fbff", "#5fe9f5"
-
-
-def launch_app(note):
-    """Bring up the app that sent a notification (single-instance apps just raise)."""
-    ids = [note["entry"]] if note["entry"] else []
-    if note["app"]:
-        ids += [hit[0] for hit in Gio.DesktopAppInfo.search(note["app"])[:1] if hit]
-    for desktop_id in ids:
-        try:
-            info = Gio.DesktopAppInfo.new(
-                desktop_id if desktop_id.endswith(".desktop") else desktop_id + ".desktop")
-        except TypeError:
-            info = None
-        if info:
-            info.launch([], Gdk.Display.get_default().get_app_launch_context())
-            return
 
 
 class Bubble:
@@ -42,6 +26,7 @@ class Bubble:
         self.display_left = 0.0    # display seconds still owed (kept while hovered)
         self.display_from = None   # when the display timer started; None if not running
         self.hovered = False
+        self.closing = False       # fading out for good
         self.typing_done = False
         self.box = (1, 1)          # bubble body size, without tail and stroke room
 
@@ -104,7 +89,7 @@ class Bubble:
     def show(self, note):
         self.cancel_step()
         self.note, self.typed, self.display_from = note, 0.0, None
-        self.typing_done = False
+        self.typing_done, self.closing = False, False
         self.hovered = False  # a fresh window: no leave event will come for the old one
         self.box = bubble_box(*self.layouts(), bool(note["app"]))
         w, h = self.box[0] + 2 * self.EDGE, self.box[1] + self.TAIL_H + 2 * self.EDGE
@@ -160,7 +145,7 @@ class Bubble:
 
     def finish(self):
         self.cancel_step()
-        self.display_from = None
+        self.display_from, self.closing = None, True
         self.fade.to(0.0)
         self.step_src = GLib.timeout_add(220, self.after_fade)
         return False
@@ -179,16 +164,15 @@ class Bubble:
         return False
 
     # -- mouse
-    def on_click(self, _w, event):
-        if not self.note:
-            return True
-        if event.button == 1 and not self.note.get("own"):  # our own reminders have no app
-            launch_app(self.note)
-        self.finish()
+    def on_click(self, *_):
+        if self.note and not self.closing:  # any click just dismisses it
+            self.finish()
         return True
 
     def on_enter(self, *_):
         self.hovered = True
+        if not self.closing:  # see through it, like the GIF
+            self.fade.to(self.app.cfg["hover_opacity"])
         if self.display_from is not None:  # pause the display timer
             self.cancel_step()
             self.display_left -= time.monotonic() - self.display_from
@@ -197,6 +181,8 @@ class Bubble:
 
     def on_leave(self, *_):
         self.hovered = False
+        if self.note and not self.closing:
+            self.fade.to(1.0)
         if (self.note and self.step_src is None and self.typing_done
                 and self.display_from is None and not self.note.get("sticky")):
             self.display_left = max(self.display_left, 1.5)

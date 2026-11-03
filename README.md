@@ -8,8 +8,8 @@ Clippy style.
 - **Transparent**: the GIF's alpha channel is respected.
 - **Click-through**: clicks go to whatever is underneath; hovering fades it to 25%.
 - **Speech bubbles**: while the GIF is visible, desktop notifications appear as bubbles
-  coming from it (typed out, one at a time). Click a bubble to open the app that sent it;
-  hover it to keep it on screen. Hide the GIF and Plasma's normal popups come back.
+  coming from it (typed out, one at a time). Click a bubble to dismiss it;
+  hover it to see through it and keep it on screen. Hide the GIF and Plasma's normal popups come back.
 - **Sits on the taskbar**: it stays above the panel, and rides up and down with an
   auto-hide panel.
 - **Resizable / hideable** from global shortcuts; remembers its settings.

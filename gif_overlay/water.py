@@ -16,9 +16,9 @@ LINES = [
 
 
 def water_note():
-    # "own": not from an app, so clicking it doesn't launch anything; "sticky": stays put
+    # "sticky": no display timer, it stays until clicked
     return {"app": "💧 Water break", "summary": random.choice(LINES), "body": "", "entry": "",
-            "replaces": 0, "sticky": True, "own": True}
+            "replaces": 0, "sticky": True}
 
 
 class WaterReminder:
