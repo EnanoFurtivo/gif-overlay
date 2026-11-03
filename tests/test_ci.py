@@ -2,7 +2,9 @@
 import os, sys, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gif_overlay.ci import CiTracker, describe, median_duration, parse_time
+import urllib.error
+
+from gif_overlay.ci import CiTracker, describe, median_duration, normalize_repos, parse_time, poll
 
 T0 = parse_time("2026-11-03T12:00:00Z")
 
@@ -101,6 +103,61 @@ def test_forget():
     t.update([run(1)], T0)
     t.forget(1)
     assert t.tiles(T0) == [] and t.update([], T0 + 1) == []
+
+
+def test_cancelled_by_newer_run_goes_without_sound():
+    t = CiTracker()
+    t.update([run(1)], T0)
+    t.update([run(1), run(2, start=T0 + 30)], T0 + 30)  # concurrency: 2 cancels 1
+    t.update([run(2, start=T0 + 30)], T0 + 35)
+    assert t.finish(run(1, "completed", "cancelled", T0, T0 + 34), T0 + 35) is False
+    assert [x.run["id"] for x in t.tiles(T0 + 35)] == [2]
+
+def test_stale_active_listing_does_not_reactivate():
+    t = CiTracker()
+    t.update([run(1)], T0)
+    t.finish(run(1, "completed", "success", T0, T0 + 5), T0 + 5)
+    t.update([run(1)], T0 + 10)  # an active list that hasn't caught up yet
+    assert t.tiles(T0 + 10)[0].finished_at is not None
+    assert t.finish(run(1, "completed", "success", T0, T0 + 5), T0 + 15) is False
+    rerun = dict(run(1, start=T0 + 5), run_attempt=2)  # a real rerun (same start, newer attempt)
+    t.update([rerun], T0 + 20)
+    assert t.tiles(T0 + 20)[0].finished_at is None
+
+
+# ---------------------------------------------------------------- fetching
+class FakeGitHub:
+    def __init__(self, fail=()):
+        self.fail, self.calls = fail, []
+
+    def get(self, path, conditional=False):
+        self.calls.append(path)
+        if any(f in path for f in self.fail):
+            raise urllib.error.HTTPError(path, 404 if "/runs/7" in path else 403, "no", {}, None)
+        if "/runs?status=in_progress" in path:
+            return {"workflow_runs": [{"id": 1, "workflow_id": 5}]}
+        if "/runs/" in path:
+            return {"id": int(path.rsplit("/", 1)[1]), "status": "completed"}
+        return {"workflow_runs": []}
+
+def test_poll_one_bad_repo_or_history_doesnt_sink_the_rest():
+    gh = FakeGitHub(fail=("bad/repo", "workflows/9"))
+    active, ended, gone, found, errors = poll(gh, ["o/r", "bad/repo"], [("o/r", 3), ("o/r", 7)],
+                                              [("o/r", 5), ("o/r", 9)])
+    assert [(r["id"], r["repo"]) for r in active] == [(1, "o/r")]
+    assert [r["id"] for r in ended] == [3, 7]
+    assert found == {("o/r", 5): [], ("o/r", 9): []}  # a failing history: no estimate, not retried
+    assert len(errors) == 4 and gone == []  # bad/repo's 3 lists + history 9
+
+def test_poll_deleted_run_is_gone():
+    gh = FakeGitHub(fail=("/runs/7",))
+    _a, ended, gone, _f, errors = poll(gh, ["o/r"], [("o/r", 7)], [])
+    assert ended == [] and gone == [7] and errors == []
+
+def test_normalize_repos():
+    assert normalize_repos("o/r") == ["o/r"]
+    assert normalize_repos(["https://github.com/o/r.git", "o/r", " x/y ", "nope", 3]) == ["o/r", "x/y"]
+    assert normalize_repos(None) == [] and normalize_repos(5) == []
 
 
 # ---------------------------------------------------------------- texts

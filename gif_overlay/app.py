@@ -156,6 +156,8 @@ if cfg["monitor"] is not None and str(cfg["monitor"]).lstrip("-").isdigit():
     cfg["monitor"] = int(cfg["monitor"])
 if cfg["monitor"] == -1:
     cfg["monitor"] = None
+from gif_overlay.ci import normalize_repos
+cfg["ci_repos"] = normalize_repos(cfg["ci_repos"])
 if cfg["ci_monitor"] is not None and str(cfg["ci_monitor"]).lstrip("-").isdigit():
     cfg["ci_monitor"] = int(cfg["ci_monitor"])
 if cfg["ci_monitor"] == -1:

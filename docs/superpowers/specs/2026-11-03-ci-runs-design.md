@@ -50,8 +50,10 @@ one of its runs finishes.
 
 ## Settings
 
-`ci` (bool, `--ci/--no-ci`, default on), `ci_repos` (list, default `["EnanoFurtivo/ever-panel"]`,
-`--ci-repo` repeatable), `ci_monitor` (default `"23MP55"`; not found → the main GIF's monitor),
+`ci` (bool, `--ci/--no-ci`, default on), `ci_repos` (list, `--ci-repo` repeatable; default
+empty, since the project is public — this user's config sets `["EnanoFurtivo/ever-panel"]`),
+`ci_monitor` (default: the main GIF's monitor — this user's config sets `"23MP55"`; on the GIF's
+monitor the column stacks above the GIF instead of covering it),
 `ci_gif` (default `~/gifs/run.gif`; unreadable → the main GIF), `ci_size` (tile height, default
 44).
 

@@ -1,82 +1,22 @@
 """Bottom-right corner of a chosen monitor: one tile per running GitHub Actions run."""
-import json, math, os, subprocess, sys, threading, time, urllib.error, urllib.request
+import math, os, sys, threading, time
 
 from gif_overlay.agents_view import Gif
 from gif_overlay.bubble import EDGE
-from gif_overlay.ci import CiTracker, describe, median_duration
+from gif_overlay.ci import CiTracker, GitHub, describe, median_duration, poll
 from gif_overlay.gtkbits import (NEON, Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo, Tween,
                                  cairo, clear_bg, neon_stroke)
 from gif_overlay.helpers import panel_offset
 
-API = "https://api.github.com"
-ACTIVE_STATUSES = ("in_progress", "queued", "waiting")
 POLL_ACTIVE, POLL_IDLE = 10, 30  # seconds between polls
 MAX_ROWS = 8
 V_GAP, H_GAP, PAD = 6, 6, 8
+CAPTION_MAX_W = 220  # long branch names get "…"
 BAR_H = 3
 FILL = (0.043, 0.055, 0.078)
 COLORS = {"running": NEON, "queued": NEON, "waiting": NEON, "over": (1.0, 0.66, 0.1),
           "success": (0.2, 1.0, 0.45), "failure": (1.0, 0.24, 0.32), "cancelled": (0.6, 0.65, 0.7)}
 GLYPHS = {"success": "✓", "failure": "✗", "cancelled": "–"}
-
-
-class GitHub:
-    """Tiny REST client: token from `gh auth token`, ETags so unchanged lists cost nothing.
-    Only ever used from the worker thread."""
-    def __init__(self):
-        self.token, self.etags, self.cache = None, {}, {}
-
-    def get(self, path, conditional=False):
-        if not self.token:
-            out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
-                                 timeout=15)
-            self.token = out.stdout.strip()
-            if not self.token:
-                raise RuntimeError("`gh auth token` gave no token (is gh logged in?)")
-        req = urllib.request.Request(API + path, headers={
-            "Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "gif-overlay"})
-        if conditional and path in self.etags:
-            req.add_header("If-None-Match", self.etags[path])
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.load(resp)
-                if conditional and resp.headers.get("ETag"):
-                    self.etags[path], self.cache[path] = resp.headers["ETag"], data
-                return data
-        except urllib.error.HTTPError as e:
-            if e.code == 304 and path in self.cache:
-                return self.cache[path]
-            if e.code == 401:
-                self.token = None  # re-read it next time (gh may have refreshed it)
-            raise
-
-
-def poll(gh, repos, tracked, histories):
-    """Worker thread: the active runs of every repo, the tracked runs that left those lists
-    (fetched by id) and the requested histories. Plain data only, no GTK."""
-    active = []
-    for repo in repos:
-        for status in ACTIVE_STATUSES:
-            data = gh.get(f"/repos/{repo}/actions/runs?status={status}&per_page=30",
-                          conditional=True)
-            active += [dict(r, repo=repo) for r in data.get("workflow_runs", [])]
-    ids = {r["id"] for r in active}
-    ended, gone = [], []
-    for repo, run_id in tracked:
-        if run_id not in ids:
-            try:
-                ended.append(dict(gh.get(f"/repos/{repo}/actions/runs/{run_id}"), repo=repo))
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
-                gone.append(run_id)  # deleted
-    found = {}
-    for repo, workflow_id in histories:
-        data = gh.get(f"/repos/{repo}/actions/workflows/{workflow_id}/runs"
-                      "?status=success&per_page=20&exclude_pull_requests=true")
-        found[(repo, workflow_id)] = data.get("workflow_runs", [])
-    return active, ended, gone, found
 
 
 class CiView:
@@ -98,11 +38,11 @@ class CiView:
             print("gif-overlay: can't load the CI GIF, using the main one:", e.message,
                   file=sys.stderr)
             self.gif = Gif(app.cfg["gif"], self.on_gif_frame)
-        want = app.cfg["ci_monitor"]
-        self.monitor = app.find_monitor(want) if want is not None else None
-        if want is not None and not self.monitor:
-            print(f"gif-overlay: CI monitor {want!r} not found, using the GIF's",
-                  file=sys.stderr)
+        self.monitor = None        # the monitor it's shown on (set when it shows)
+        self.warned_monitor = False
+        display = Gdk.Display.get_default()
+        display.connect("monitor-added", self.on_monitors_changed)
+        display.connect("monitor-removed", self.on_monitors_changed)
 
         self.win = Gtk.Window()
         GtkLayerShell.init_for_window(self.win)
@@ -115,9 +55,12 @@ class CiView:
             self.win.set_visual(app.visual)
         self.win.set_app_paintable(True)
         self.win.connect("draw", clear_bg)
+        # its monitor going away closes a layer surface; keep the window, just hide it
+        self.win.connect("delete-event", lambda *_: self.hide() or True)
         self.area = Gtk.DrawingArea()
         self.area.connect("draw", self.draw)
         self.win.add(self.area)
+        app.place_listeners.append(self.place)  # stacked above the GIF when sharing its monitor
         if app.cfg["ci"] and app.cfg["ci_repos"]:
             GLib.idle_add(self.start_poll)
             GLib.timeout_add_seconds(1, self.tick)  # timers count, finished tiles expire
@@ -126,10 +69,10 @@ class CiView:
     def start_poll(self):
         if self.busy:
             return False
-        self.busy = True
         tracked = [(t.run["repo"], t.run["id"]) for t in self.tracker.runs.values()
                    if t.finished_at is None]
         args = (self.gh, list(self.app.cfg["ci_repos"]), tracked, sorted(self.stale))
+        self.busy = True
 
         def work():
             try:
@@ -142,17 +85,27 @@ class CiView:
 
     def polled(self, result):
         self.busy = False
-        if isinstance(result, Exception):
-            if not self.failing:
-                print("gif-overlay: couldn't read the CI runs (will keep trying):", result,
-                      file=sys.stderr)
-            self.failing = True
-            GLib.timeout_add_seconds(POLL_IDLE, self.start_poll)
-            return False
-        if self.failing:
+        delay = POLL_IDLE
+        try:
+            delay = self.apply(result)
+        except Exception as e:  # never let one bad answer stop the polling
+            print("gif-overlay: CI runs:", repr(e), file=sys.stderr)
+        finally:
+            GLib.timeout_add_seconds(delay, self.start_poll)
+        return False
+
+    def apply(self, result):
+        """Take in one poll's results; returns the seconds until the next poll."""
+        errors = [str(result)] if isinstance(result, Exception) else result[4]
+        if errors and not self.failing:
+            print("gif-overlay: couldn't read some CI runs (will keep trying):",
+                  "; ".join(errors), file=sys.stderr)
+        elif not errors and self.failing:
             print("gif-overlay: reading the CI runs again", file=sys.stderr)
-        self.failing = False
-        active, ended, gone, found = result
+        self.failing = bool(errors)
+        if isinstance(result, Exception):
+            return POLL_IDLE
+        active, ended, gone, found, _errors = result
         self.history.update(found)
         self.stale -= set(found)
         now = time.time()
@@ -170,23 +123,47 @@ class CiView:
         if finished and not self.app.cfg["hidden"]:
             self.app.sound.play()
         self.refresh()
-        soon = self.tracker.is_active() or self.stale
-        GLib.timeout_add_seconds(POLL_ACTIVE if soon else POLL_IDLE, self.start_poll)
-        return False
+        return POLL_ACTIVE if self.tracker.is_active() or self.stale else POLL_IDLE
 
     def tick(self):
-        if self.rows or self.tracker.runs:
-            self.refresh()
+        try:
+            if self.rows or self.tracker.runs:
+                self.refresh()
+        except Exception as e:  # keep ticking
+            print("gif-overlay: CI runs:", repr(e), file=sys.stderr)
         return True
+
+    # -- which monitor: the configured one, else the GIF's
+    def pick_monitor(self):
+        want = self.app.cfg["ci_monitor"]
+        mon = self.app.find_monitor(want) if want is not None else None
+        if want is not None and not mon and not self.warned_monitor:
+            print(f"gif-overlay: CI monitor {want!r} not found, using the GIF's",
+                  file=sys.stderr)
+            self.warned_monitor = True
+        if mon:
+            self.warned_monitor = False
+            return mon
+        gdkwin = self.app.win.get_window()
+        return self.app.pinned_monitor or (Gdk.Display.get_default().get_monitor_at_window(gdkwin)
+                                           if gdkwin else None)
+
+    def on_monitors_changed(self, *_):
+        if self.win.get_visible():  # show it again on the right monitor
+            self.hide()
+            GLib.idle_add(lambda: self.refresh() and False)
 
     # -- layout
     def estimate(self, run):
         history = self.history.get((run["repo"], run["workflow_id"]))
         return median_duration(history, run.get("head_branch")) if history else None
 
-    def text(self, s, font):
+    def text(self, s, font, max_w=None):
         layout = self.area.create_pango_layout(s)
         layout.set_font_description(Pango.FontDescription.from_string(font))
+        if max_w:
+            layout.set_width(max_w * Pango.SCALE)
+            layout.set_ellipsize(Pango.EllipsizeMode.END)
         return layout
 
     def refresh(self):
@@ -203,7 +180,8 @@ class CiView:
         self.rows = []
         for t in tiles:
             caption, timing, fraction, state = describe(t, self.estimate(t.run), now, multi)
-            self.rows.append((self.text(caption, "Sans Bold 8"), self.text(timing, "Sans 8"),
+            self.rows.append((self.text(caption, "Sans Bold 8", CAPTION_MAX_W),
+                              self.text(timing, "Sans 8"),
                               fraction, state))
         size = cfg["ci_size"]
         self.tile_w = round(size * min(1.8, max(0.6, self.gif.aspect())))
@@ -219,11 +197,14 @@ class CiView:
         self.area.set_size_request(self.win_w, self.win_h)
         self.win.resize(self.win_w, self.win_h)
         if not self.win.get_visible():
-            if self.monitor or self.app.pinned_monitor:
-                GtkLayerShell.set_monitor(self.win, self.monitor or self.app.pinned_monitor)
+            self.monitor = self.pick_monitor()
+            if self.monitor:
+                GtkLayerShell.set_monitor(self.win, self.monitor)
             self.place()
             self.win.show_all()
-            self.win.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
+            gdkwin = self.win.get_window()
+            if gdkwin:
+                gdkwin.input_shape_combine_region(cairo.Region(), 0, 0)
         self.invalidate()
 
     def hide(self):
@@ -238,6 +219,9 @@ class CiView:
         return self.app.monitor_geometry()
 
     def bottom(self):
+        if self.monitor is None or self.geometry() == self.app.monitor_geometry():
+            # the GIF's corner: stack above it instead of on top of it
+            return self.app.bottom_margin() + self.app.size()[1] + V_GAP
         return self.app.cfg["margin"] + panel_offset(self.app.panels, self.geometry())
 
     def place(self):

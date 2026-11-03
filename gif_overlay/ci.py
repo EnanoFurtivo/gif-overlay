@@ -1,11 +1,15 @@
-"""GitHub Actions runs for the CI column: which ones to show, how long they usually take."""
-import datetime, statistics
+"""GitHub Actions runs for the CI column: which ones to show, how long they usually take,
+and fetching them (no GTK here: the fetching runs on a worker thread)."""
+import datetime, json, re, statistics, subprocess, urllib.error, urllib.request
 
 from gif_overlay.agents import format_elapsed
 
 SUCCESS_LINGER, OTHER_LINGER = 60, 600  # how long a finished run's tile stays (s)
 FAILED = {"failure", "timed_out", "startup_failure"}
 ESTIMATE_RUNS = 10
+API = "https://api.github.com"
+ACTIVE_STATUSES = ("in_progress", "queued", "waiting")
+REPO = re.compile(r"[\w.-]+/[\w.-]+")
 
 
 def parse_time(iso):
@@ -28,6 +32,22 @@ def median_duration(history, branch, n=ESTIMATE_RUNS):
     return statistics.median(duration(r) for r in runs) if runs else None
 
 
+def normalize_repos(value):
+    """The configured repos as 'owner/repo' strings (URLs and .git tolerated, junk dropped)."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    repos = []
+    for v in value:
+        if not isinstance(v, str):
+            continue
+        v = re.sub(r"^(https?://)?(www\.)?github\.com/", "", v.strip()).removesuffix(".git")
+        if REPO.fullmatch(v) and v not in repos:
+            repos.append(v)
+    return repos
+
+
 class Tile:
     def __init__(self, run):
         self.run, self.finished_at = run, None
@@ -47,6 +67,8 @@ class CiTracker:
         active that aren't in it any more: fetch them to learn how they ended."""
         for run in active:
             tile = self.runs.get(run["id"])
+            if tile is not None and tile.finished_at is not None and not rerun(tile.run, run):
+                continue  # a list that hasn't caught up with its ending yet
             if tile is None or tile.finished_at is not None:  # new, or a rerun
                 fresh = Tile(run)
                 for rid, old in list(self.runs.items()):
@@ -63,11 +85,22 @@ class CiTracker:
         tile = self.runs.get(run["id"])
         if tile is None:
             return False
-        tile.run = run
-        if run.get("status") != "completed" or tile.finished_at is not None:
+        if tile.finished_at is not None:
             return False
-        tile.finished_at = now
+        if run.get("status") != "completed":
+            tile.run = run
+            return False
+        if self.newer(tile):  # e.g. cancelled by the run that replaced it: just go
+            del self.runs[run["id"]]
+            return False
+        tile.run, tile.finished_at = run, now
         return True
+
+    def newer(self, tile):
+        """Is there a newer run of the same workflow on the same branch?"""
+        mine = order(tile)
+        return any(t is not tile and t.key() == tile.key() and order(t) > mine
+                   for t in self.runs.values())
 
     def forget(self, run_id):
         self.runs.pop(run_id, None)
@@ -80,10 +113,19 @@ class CiTracker:
             if t.finished_at is not None:
                 linger = (self.success_linger if t.run.get("conclusion") == "success"
                           else self.other_linger)
-                if now - t.finished_at > linger:
+                if now - t.finished_at > linger or self.newer(t):
                     del self.runs[rid]
-        return sorted(self.runs.values(),
-                      key=lambda t: (parse_time(t.run.get("created_at")) or 0, t.run["id"]))
+        return sorted(self.runs.values(), key=order)
+
+
+def order(tile):
+    return parse_time(tile.run.get("created_at")) or 0, tile.run["id"]
+
+
+def rerun(old, new):
+    """Has a finished run been started again (a new attempt)?"""
+    return (new.get("run_attempt", 1) > old.get("run_attempt", 1)
+            or new.get("run_started_at") != old.get("run_started_at"))
 
 
 def describe(tile, estimate, now, multi_repo=False):
@@ -112,3 +154,73 @@ def describe(tile, estimate, now, multi_repo=False):
         return (caption, f"{format_elapsed(elapsed)} / ~{format_elapsed(estimate)}",
                 elapsed / estimate if estimate else 1.0, "running")
     return caption, f"{format_elapsed(elapsed)} / +{format_elapsed(elapsed - estimate)}", 1.0, "over"
+
+
+# ---------------------------------------------------------------- fetching (worker thread)
+class GitHub:
+    """Tiny REST client: token from `gh auth token`, ETags so unchanged lists cost nothing.
+    Only ever used from the worker thread."""
+    def __init__(self):
+        self.token, self.etags, self.cache = None, {}, {}
+
+    def get(self, path, conditional=False):
+        if not self.token:
+            out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                                 timeout=15)
+            self.token = out.stdout.strip()
+            if not self.token:
+                raise RuntimeError("`gh auth token` gave no token (is gh logged in?)")
+        req = urllib.request.Request(API + path, headers={
+            "Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "gif-overlay"})
+        if conditional and path in self.etags:
+            req.add_header("If-None-Match", self.etags[path])
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.load(resp)
+                if conditional and resp.headers.get("ETag"):
+                    self.etags[path], self.cache[path] = resp.headers["ETag"], data
+                return data
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and path in self.cache:
+                return self.cache[path]
+            if e.code == 401:
+                self.token = None  # re-read it next time (gh may have refreshed it)
+            raise
+
+
+def poll(gh, repos, tracked, histories):
+    """The active runs of every repo, the tracked runs that left those lists (fetched by id)
+    and the requested histories: (active, ended, gone ids, histories, errors). One failing
+    request only loses its own part."""
+    active, ended, gone, found, errors = [], [], [], {}, []
+    for repo in repos:
+        for status in ACTIVE_STATUSES:
+            try:
+                data = gh.get(f"/repos/{repo}/actions/runs?status={status}&per_page=30",
+                              conditional=True)
+                active += [dict(r, repo=repo) for r in data.get("workflow_runs", [])]
+            except Exception as e:
+                errors.append(f"{repo} {status} runs: {e}")
+    ids = {r["id"] for r in active}
+    for repo, run_id in tracked:
+        if run_id in ids:
+            continue
+        try:
+            ended.append(dict(gh.get(f"/repos/{repo}/actions/runs/{run_id}"), repo=repo))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                gone.append(run_id)  # deleted
+            else:
+                errors.append(f"{repo} run {run_id}: {e}")
+        except Exception as e:
+            errors.append(f"{repo} run {run_id}: {e}")
+    for repo, workflow_id in histories:
+        try:
+            data = gh.get(f"/repos/{repo}/actions/workflows/{workflow_id}/runs"
+                          "?status=success&per_page=30&exclude_pull_requests=true")
+            found[(repo, workflow_id)] = data.get("workflow_runs", [])
+        except Exception as e:
+            errors.append(f"{repo} workflow {workflow_id} history: {e}")
+            found[(repo, workflow_id)] = []  # no estimate; tried again after its next run
+    return active, ended, gone, found, errors
