@@ -212,7 +212,61 @@ def gif_for_level(levels, level, main_gif):
 
 
 # ---------------------------------------------------------------- layout
-Placement = namedtuple("Placement", "kind session_id index x y w h depth")
+# parent: for a forked session's own sprite, the session it was started from
+MAX_FORK_DEPTH = 6  # sessions started from sessions started from... deeper ones aren't nested
+
+
+def forest(active, parent_of, max_depth=MAX_FORK_DEPTH):
+    """Sessions in tree order as [(id, depth, ghost)]: every session right under the one it
+    was started from (parent_of(id) -> id or None). An idle ancestor is included as a ghost,
+    where its first active descendant would have been; cycles are ignored."""
+    is_active, parent = set(active), {}
+
+    def reaches(a, b):  # does following parents from a lead to b?
+        seen = set()
+        while a is not None and a not in seen:
+            if a == b:
+                return True
+            seen.add(a)
+            a = parent.get(a)
+        return False
+
+    order = []
+    for sid in active:
+        chain, cur = [], sid
+        while len(chain) < max_depth:
+            p = parent_of(cur)
+            if p is None or p in parent or reaches(p, cur):
+                if p is not None and p in parent and not reaches(p, cur):
+                    parent[cur] = p  # joins a known tree
+                    chain.append(p)
+                break
+            parent[cur] = p
+            chain.append(p)
+            if p in is_active:
+                break  # its own ancestors come with it
+            cur = p
+        for node in reversed(chain):
+            if node not in order:
+                order.append(node)
+        if sid not in order:
+            order.append(sid)
+    children = {}
+    for node in order:
+        children.setdefault(parent.get(node), []).append(node)
+    rows = []
+
+    def visit(node, depth):
+        rows.append((node, depth, node not in is_active))
+        for child in children.get(node, []):
+            visit(child, depth + 1)
+    for root in children.get(None, []):
+        visit(root, 0)
+    return rows
+
+
+Placement = namedtuple("Placement", "kind session_id index x y w h depth parent",
+                       defaults=(None,))
 DEPTH_RATIO, MIN_SIZE = 0.55, 16  # each level is 55% of its parent, never under 16px
 INDENT, V_GAP, SESSION_GAP, CAPTION_GAP, BUBBLE_GAP = 18, 4, 12, 2, 8
 MAX_AGENTS, MORE_W, MORE_H = 12, 40, 20
@@ -221,36 +275,45 @@ MAX_AGENTS, MORE_W, MORE_H = 12, 40, 20
 def layout(rows, agent_size, aspect, bubble_size, caption_size):
     """One column from the top-left: each session, its name, then its subagents below it.
 
-    rows: [{"id", "agents": [depth, ...] in tree order, "waiting": bool}]; aspect(depth) is
-    that level's GIF width/height, bubble_size / caption_size(session_id) give (w, h).
+    rows: [{"id", "agents": [depth, ...] in tree order, "waiting": bool, "depth": the
+    session's own level (a session started from another one sits under it, like a subagent;
+    default 0), "parent": that session's id}] in tree order; aspect(depth) is that level's GIF
+    width/height, bubble_size / caption_size(session_id) give (w, h).
     Returns (placements, width, height). Sprite index = position in "agents" (-1 = the
-    session); a "more" placement's index is how many subagents didn't fit.
+    session); a "more" placement's index is how many subagents didn't fit. Depths in the
+    placements are absolute (session level + subagent level).
     """
+    def sprite_size(depth):
+        h = max(MIN_SIZE, round(agent_size * DEPTH_RATIO ** depth))
+        return round(h * aspect(depth)), h
+
     placements, width, y = [], 0, 0
-    for row in rows:
-        sid, h0 = row["id"], agent_size
-        w0 = round(h0 * aspect(0))
-        placements.append(Placement("sprite", sid, -1, 0, y, w0, h0, 0))
+    for i, row in enumerate(rows):
+        sid, d = row["id"], row.get("depth", 0)
+        if i and d:  # still the same tree: as close as subagents
+            y -= SESSION_GAP - V_GAP
+        x0, (w0, h0) = INDENT * d, sprite_size(d)
+        placements.append(Placement("sprite", sid, -1, x0, y, w0, h0, d, row.get("parent")))
         cw, ch = caption_size(sid)
-        placements.append(Placement("caption", sid, -1, max(0, (w0 - cw) // 2),
-                                    y + h0 + CAPTION_GAP, cw, ch, 0))
+        placements.append(Placement("caption", sid, -1, x0 + max(0, (w0 - cw) // 2),
+                                    y + h0 + CAPTION_GAP, cw, ch, d))
         bottom = y + h0 + CAPTION_GAP + ch
         if row["waiting"]:  # beside the session sprite, tail pointing at it
             bw, bh = bubble_size(sid)
-            bx, by = max(w0, cw) + BUBBLE_GAP, y + max(0, (h0 - bh) // 2)
-            placements.append(Placement("bubble", sid, -1, bx, by, bw, bh, 0))
+            bx, by = x0 + max(w0, cw) + BUBBLE_GAP, y + max(0, (h0 - bh) // 2)
+            placements.append(Placement("bubble", sid, -1, bx, by, bw, bh, d))
             bubble_bottom = by + bh
         else:
             bubble_bottom = y
         cursor = bottom + V_GAP
         for index, depth in enumerate(row["agents"][:MAX_AGENTS]):
-            h = max(MIN_SIZE, round(agent_size * DEPTH_RATIO ** depth))
-            w = round(h * aspect(depth))
-            placements.append(Placement("sprite", sid, index, INDENT * depth, cursor, w, h, depth))
+            w, h = sprite_size(d + depth)
+            placements.append(Placement("sprite", sid, index, INDENT * (d + depth), cursor, w, h,
+                                        d + depth))
             cursor += h + V_GAP
         if len(row["agents"]) > MAX_AGENTS:
-            placements.append(Placement("more", sid, len(row["agents"]) - MAX_AGENTS, INDENT,
-                                        cursor, MORE_W, MORE_H, 1))
+            placements.append(Placement("more", sid, len(row["agents"]) - MAX_AGENTS,
+                                        INDENT * (d + 1), cursor, MORE_W, MORE_H, d + 1))
             cursor += MORE_H + V_GAP
         y = max(cursor - V_GAP, bubble_bottom) + SESSION_GAP
     for p in placements:

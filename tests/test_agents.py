@@ -2,7 +2,7 @@
 import os, sys, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from gif_overlay.agents import (AgentTracker, HOOK_MARKER, format_elapsed, gif_for_level, layout,
+from gif_overlay.agents import (AgentTracker, HOOK_MARKER, forest, format_elapsed, gif_for_level, layout,
                                 level_gifs, merge_hooks, remove_hooks)
 
 
@@ -256,6 +256,46 @@ def test_layout_bubble_beside_session_sprite():
     placements, _, h = layout([{"id": "a", "agents": [], "waiting": True}], 100, square,
                               lambda s: (200, 150), caption)
     assert boxes(placements)[-1][4] == 0 and h == 150
+
+
+def test_layout_forked_session_nests_like_a_subagent():
+    rows = [{"id": "p", "agents": [], "waiting": False},
+            {"id": "c", "agents": [1], "waiting": True, "depth": 1, "parent": "p"},
+            {"id": "x", "agents": [], "waiting": False}]
+    placements, _w, _h = layout(rows, 100, square, lambda s: (50, 20), caption)
+    assert boxes(placements) == [
+        ("sprite", "p", -1, 0, 0, 100, 100, 0),
+        ("caption", "p", -1, 20, 102, 60, 14, 0),
+        ("sprite", "c", -1, 18, 120, 55, 55, 1),       # indented, 55%, a V_GAP below
+        ("caption", "c", -1, 18, 177, 60, 14, 1),      # never left of its sprite
+        ("bubble", "c", -1, 18 + 60 + 8, 137, 50, 20, 1),
+        ("sprite", "c", 0, 36, 195, 30, 30, 2),        # its subagents: deeper still
+        ("sprite", "x", -1, 0, 237, 100, 100, 0),      # the next tree: SESSION_GAP
+        ("caption", "x", -1, 20, 339, 60, 14, 0),
+    ]
+    assert placements[2].parent == "p" and placements[0].parent is None
+
+
+# ---------------------------------------------------------------- forked sessions
+def test_forest_nests_children_under_parents():
+    parents = {"c": "p", "g": "c"}
+    assert forest(["p", "c", "x", "g"], parents.get) == [
+        ("p", 0, False), ("c", 1, False), ("g", 2, False), ("x", 0, False)]
+
+def test_forest_idle_parent_is_a_ghost_where_its_first_child_was():
+    parents = {"c": "p", "d": "p", "q": "gp", "gp": None}
+    assert forest(["x", "c", "y", "d"], parents.get) == [
+        ("x", 0, False), ("p", 0, True), ("c", 1, False), ("d", 1, False), ("y", 0, False)]
+    parents = {"c": "p", "p": "gp"}  # an idle grandparent too
+    assert forest(["c"], parents.get) == [("gp", 0, True), ("p", 1, True), ("c", 2, False)]
+
+def test_forest_cycles_and_self_parents_terminate():
+    assert forest(["a", "b"], {"a": "b", "b": "a"}.get) in (
+        [("b", 0, False), ("a", 1, False)], [("a", 0, False), ("b", 1, False)])
+    assert forest(["a"], {"a": "a"}.get) == [("a", 0, False)]
+    chain = {str(i): str(i + 1) for i in range(100)}
+    rows = forest(["0"], chain.get)
+    assert rows[-1] == ("0", len(rows) - 1, False) and len(rows) <= 7
 
 
 # ---------------------------------------------------------------- hooks

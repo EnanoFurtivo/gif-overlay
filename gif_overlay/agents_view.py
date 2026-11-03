@@ -1,8 +1,8 @@
 """Top-left corner: one sprite per active Claude agent, plus "needs you" bubbles."""
 import glob, json, math, os, re, sys, time
 
-from gif_overlay.agents import (INDENT, AgentTracker, format_elapsed, gif_for_level, layout,
-                                level_gifs)
+from gif_overlay.agents import (INDENT, AgentTracker, forest, format_elapsed, gif_for_level,
+                                layout, level_gifs)
 from gif_overlay.bubble import EDGE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
                                  PangoCairo, Tween, cairo, clear_bg, neon_stroke)
@@ -18,6 +18,7 @@ BADGE_OVERHANG = 8  # timer badges stick out of the tile corner by this much
 SMALL_TILE = 36     # tiles smaller than this get their badge beside them
 BADGE_SIDE_W = 44   # room for a badge beside a small tile
 LOCAL_ID = re.compile(r"local_[0-9a-f-]+")
+GHOST_ALPHA = 0.4   # an idle session shown only because a session it started is active
 
 
 
@@ -57,8 +58,8 @@ class Gif:
         self.src = GLib.timeout_add(max(delay, 20), self.tick) if delay >= 0 else None
         return False
 
-    def surface(self, w, h):
-        pixbuf = self.frames.get_pixbuf()
+    def surface(self, w, h, still=False):
+        pixbuf = self.anim.get_static_image() if still else self.frames.get_pixbuf()
         key = (pixbuf, w, h)
         if key not in self.cache:
             if len(self.cache) > 400:
@@ -82,7 +83,9 @@ class AgentsView:
         self.load_state()          # sessions seen before a restart, timers and all
         self.levels = {}           # level -> GIF path (level 1 = Claude sessions)
         self.gifs = {}             # path -> Gif, loaded on first use
-        self.chats = {}            # Claude Code session id -> (desktop local id, title)
+        self.chats = {}            # Claude Code session id -> (desktop local id, title, parent local id)
+        self.cli_ids = {}          # desktop local id -> Claude Code session id
+        self.ghosts = set()        # idle sessions shown as the parents of active ones
         self.chats_read_at = 0.0
         self.placements, self.bubbles, self.captions, self.started = [], {}, {}, {}
         self.fade = Tween(1.0, self.invalidate, duration=0.2)
@@ -144,19 +147,34 @@ class AgentsView:
 
     def chat(self, sid):
         """(desktop local id, title) of a Claude Code session, or (None, "") for CLI ones."""
+        return self.chat_entry(sid)[:2]
+
+    def parent_session(self, sid):
+        """The Claude Code session this one was started from in the desktop app, if any."""
+        parent_local = self.chat_entry(sid)[2]
+        return self.cli_ids.get(parent_local) if parent_local else None
+
+    def chat_entry(self, sid):
         known = self.chats.get(sid)
-        # re-read now and then: a new chat only gets its title after the first prompt
-        if (known is None or not known[1]) and time.monotonic() - self.chats_read_at > 5:
+        # re-read now and then: a new chat only gets its title after the first prompt, and
+        # chats get renamed
+        since = time.monotonic() - self.chats_read_at
+        if ((known is None or not known[1]) and since > 5) or since > 60:
             self.chats_read_at = time.monotonic()
             for path in glob.glob(os.path.join(SESSIONS_DIR, "*", "*", "local_*.json")):
                 try:
                     with open(path) as f:
                         d = json.load(f)
                     if LOCAL_ID.fullmatch(d["sessionId"]):  # it goes into a claude:// link
-                        self.chats[d["cliSessionId"]] = (d["sessionId"], d.get("title") or "")
-                except (OSError, ValueError, KeyError, TypeError):
+                        parent = (d.get("spawnedFrom") or {}).get("sessionId")
+                        self.chats[d["cliSessionId"]] = (
+                            d["sessionId"], d.get("title") or "",
+                            parent if isinstance(parent, str) and LOCAL_ID.fullmatch(parent)
+                            else None)
+                        self.cli_ids[d["sessionId"]] = d["cliSessionId"]
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
                     continue
-        return self.chats.get(sid, (None, ""))
+        return self.chats.get(sid, (None, "", None))
 
     # -- remembering sessions across restarts (the runtime dir is wiped at logout/reboot)
     def load_state(self):
@@ -183,8 +201,12 @@ class AgentsView:
 
     # -- layout
     def rows_key(self):
-        return [(s.id, tuple(s.agents.values()), s.waiting) for s in
-                self.tracker.active(time.monotonic())]
+        sessions = self.tracker.active(time.monotonic())
+        for s in sessions:
+            self.chat_entry(s.id)  # re-reads the chats now and then (titles, parents)
+        # chats_read_at: a re-read may bring new titles or parents, so lay out again
+        return [(s.id, tuple(s.agents.values()), s.waiting) for s in sessions] + [
+            self.chats_read_at]
 
     def gif(self, path):
         if path not in self.gifs:
@@ -194,13 +216,13 @@ class AgentsView:
                 self.gifs[path] = Gif(self.app.cfg["gif"], self.on_gif_frame)
         return self.gifs[path]
 
-    def session_name(self, session):
-        return (self.chat(session.id)[1] or os.path.basename(session.cwd.rstrip("/"))
-                or "Claude")
+    def session_name(self, sid, cwd=""):
+        return self.chat(sid)[1] or os.path.basename(cwd.rstrip("/")) or "Claude"
 
-    def caption_layout(self, session):
-        layout = self.area.create_pango_layout(self.session_name(session))
-        layout.set_font_description(Pango.FontDescription.from_string("Sans Bold 8"))
+    def caption_layout(self, name, depth):
+        layout = self.area.create_pango_layout(name)
+        layout.set_font_description(Pango.FontDescription.from_string(
+            "Sans Bold 8" if depth == 0 else "Sans Bold 7"))
         layout.set_width(CAPTION_MAX_W * Pango.SCALE)
         layout.set_ellipsize(Pango.EllipsizeMode.END)
         return layout
@@ -219,10 +241,16 @@ class AgentsView:
         if waiting - self.was_waiting:  # someone new needs you: say "a"
             self.app.sound.play()
         self.was_waiting = waiting
-        self.bubbles = {s.id: bubble_layouts(self.area, self.session_name(s), "", s.waiting,
-                                             max_w=BUBBLE_MAX_W)
+        self.bubbles = {s.id: bubble_layouts(self.area, self.session_name(s.id, s.cwd), "",
+                                             s.waiting, max_w=BUBBLE_MAX_W)
                         for s in sessions if s.waiting}
-        self.captions = {s.id: self.caption_layout(s) for s in sessions}
+        # sessions started from another session sit under it, like its subagents
+        by_id = {s.id: s for s in sessions}
+        nested = forest([s.id for s in sessions], self.parent_session)
+        self.ghosts = {sid for sid, _d, ghost in nested if ghost}
+        self.captions = {sid: self.caption_layout(
+            self.session_name(sid, by_id[sid].cwd if sid in by_id else ""), depth)
+            for sid, depth, _g in nested}
         size = self.app.cfg["agent_size"]
 
         def aspect(depth):
@@ -237,8 +265,12 @@ class AgentsView:
             return bw + TAIL_H + 2 * EDGE, bh + 2 * EDGE
 
         trees = {s.id: self.tracker.tree(s) for s in sessions}
-        rows = [{"id": s.id, "agents": [d for _a, d in trees[s.id]], "waiting": bool(s.waiting)}
-                for s in sessions]
+        rows, above = [], {}  # above: depth -> the session last seen at that depth
+        for sid, depth, _ghost in nested:
+            above[depth] = sid
+            rows.append({"id": sid, "agents": [d for _a, d in trees.get(sid, [])],
+                         "waiting": bool(sid in by_id and by_id[sid].waiting), "depth": depth,
+                         "parent": above.get(depth - 1) if depth else None})
         # when each tile's agent appeared, for its timer badge (index -1 = the session)
         self.started = {(s.id, -1): s.first_seen for s in sessions}
         self.started.update({(s.id, i): s.agent_started.get(agent, s.first_seen)
@@ -306,15 +338,19 @@ class AgentsView:
         """File-tree elbows from each sprite down to the subagents it spawned."""
         cr.push_group()
         for i, p in enumerate(self.placements):
-            if p.kind != "sprite" or p.index < 0:
+            if p.kind != "sprite" or (p.index < 0 and p.parent is None):
                 continue
-            parent = next(q for q in reversed(self.placements[:i])
-                          if q.kind == "sprite" and q.session_id == p.session_id
-                          and q.depth == p.depth - 1)
+            if p.index < 0:  # a session started from another one: from that session's sprite
+                parent = next(q for q in reversed(self.placements[:i]) if q.kind == "sprite"
+                              and q.session_id == p.parent and q.index == -1)
+            else:
+                parent = next(q for q in reversed(self.placements[:i])
+                              if q.kind == "sprite" and q.session_id == p.session_id
+                              and q.depth == p.depth - 1)
             top = parent.y + parent.h
             if parent.index < 0:  # a session: start under its name tag
                 top = max(q.y + q.h for q in self.placements[:i]
-                          if q.kind == "caption" and q.session_id == p.session_id)
+                          if q.kind == "caption" and q.session_id == parent.session_id)
             mid = p.y + p.h / 2
             if self.mirror:  # trunk near the parent's right side, elbow into the child's right
                 trunk, child_edge = parent.x + parent.w - INDENT // 2, p.x + p.w + 2
@@ -329,7 +365,7 @@ class AgentsView:
 
     def draw_tile(self, cr, p):
         """Dark rounded tile with a neon border (the GIF is painted into it per frame)."""
-        a, r = self.fade.value, min(10, p.h * 0.22)
+        a, r = self.alpha(p.session_id), min(10, p.h * 0.22)
         cr.new_sub_path()
         cr.arc(p.x + p.w - r, p.y + r, r, -math.pi / 2, 0)
         cr.arc(p.x + p.w - r, p.y + p.h - r, r, 0, math.pi / 2)
@@ -364,6 +400,9 @@ class AgentsView:
         cr.move_to(x + 4, y + 1)
         PangoCairo.show_layout(cr, layout)
 
+    def alpha(self, sid):
+        return self.fade.value * (GHOST_ALPHA if sid in self.ghosts else 1.0)
+
     # -- drawing: the neon tiles, lines and text are drawn once into two cached layers;
     # each GIF frame only paints the frames between them (glow passes are expensive)
     def invalidate(self, *_):
@@ -390,10 +429,10 @@ class AgentsView:
         for p in self.placements:
             if p.kind == "sprite":
                 pad = max(2, round(p.h * 0.08))
-                surf = self.gif(self.path_for(p.depth)).surface(max(1, p.w - 2 * pad),
-                                                                max(1, p.h - 2 * pad))
+                surf = self.gif(self.path_for(p.depth)).surface(
+                    max(1, p.w - 2 * pad), max(1, p.h - 2 * pad), still=p.session_id in self.ghosts)
                 cr.set_source_surface(surf, EDGE + p.x + pad, EDGE + p.y + pad)
-                cr.paint_with_alpha(self.fade.value)
+                cr.paint_with_alpha(self.alpha(p.session_id))
         cr.set_source_surface(over, 0, 0)
         cr.paint()
         return True
@@ -416,7 +455,7 @@ class AgentsView:
             if p.kind == "sprite":
                 self.draw_badge(cr, p)
             elif p.kind == "caption":  # name tag: white text on a dark neon pill
-                a = self.fade.value
+                a = self.alpha(p.session_id)
                 pill(cr, p.x, p.y, p.w, p.h)
                 cr.set_source_rgba(0.043, 0.055, 0.078, a)
                 cr.fill_preserve()

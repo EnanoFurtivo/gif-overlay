@@ -38,6 +38,11 @@ reuses the deepest one above it. Each session's sprite carries its chat name; ho
 anywhere over the column fades it. New hooks apply to sessions started after installing.
 `--agent-size` sets the session sprite height (default 54), `--no-agents` turns it off.
 
+Sessions started from another session in the desktop app (its side sessions) sit under that
+session like subagents: indented, smaller, with that level's sprite, keeping their own name,
+timer and "needs you" bubble. If the session they came from is idle it still shows, dimmed,
+so the tree stays together.
+
 Agents started from a terminal show up too, but their bubble can't open a chat.
 With no `levelN` files at all, every level uses the main GIF. The hooks need `busctl`
 (part of systemd).
