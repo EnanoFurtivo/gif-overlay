@@ -18,7 +18,6 @@ BADGE_OVERHANG = 8  # timer badges stick out of the tile corner by this much
 SMALL_TILE = 36     # tiles smaller than this get their badge beside them
 BADGE_SIDE_W = 44   # room for a badge beside a small tile
 LOCAL_ID = re.compile(r"local_[0-9a-f-]+")
-GHOST_ALPHA = 0.4   # an idle session shown only because a session it started is active
 
 
 
@@ -58,8 +57,8 @@ class Gif:
         self.src = GLib.timeout_add(max(delay, 20), self.tick) if delay >= 0 else None
         return False
 
-    def surface(self, w, h, still=False):
-        pixbuf = self.anim.get_static_image() if still else self.frames.get_pixbuf()
+    def surface(self, w, h):
+        pixbuf = self.frames.get_pixbuf()
         key = (pixbuf, w, h)
         if key not in self.cache:
             if len(self.cache) > 400:
@@ -85,7 +84,6 @@ class AgentsView:
         self.gifs = {}             # path -> Gif, loaded on first use
         self.chats = {}            # Claude Code session id -> (desktop local id, title, parent local id)
         self.cli_ids = {}          # desktop local id -> Claude Code session id
-        self.ghosts = set()        # idle sessions shown as the parents of active ones
         self.chats_read_at = 0.0
         self.placements, self.bubbles, self.captions, self.started = [], {}, {}, {}
         self.fade = Tween(1.0, self.invalidate, duration=0.2)
@@ -247,7 +245,6 @@ class AgentsView:
         # sessions started from another session sit under it, like its subagents
         by_id = {s.id: s for s in sessions}
         nested = forest([s.id for s in sessions], self.parent_session)
-        self.ghosts = {sid for sid, _d, ghost in nested if ghost}
         self.captions = {sid: self.caption_layout(
             self.session_name(sid, by_id[sid].cwd if sid in by_id else ""), depth)
             for sid, depth, _g in nested}
@@ -273,6 +270,18 @@ class AgentsView:
                          "parent": above.get(depth - 1) if depth else None})
         # when each tile's agent appeared, for its timer badge (index -1 = the session)
         self.started = {(s.id, -1): s.first_seen for s in sessions}
+        # a session that is only here for the sessions it started counts as active: its timer
+        # runs from when it was first seen, else from its earliest active descendant
+        for i, (sid, depth, idle) in enumerate(nested):
+            if idle:
+                known = self.tracker.sessions.get(sid)
+                below = []
+                for other, d, _idle in nested[i + 1:]:
+                    if d <= depth:
+                        break
+                    if other in by_id:
+                        below.append(by_id[other].first_seen)
+                self.started[(sid, -1)] = known.first_seen if known else min(below)
         self.started.update({(s.id, i): s.agent_started.get(agent, s.first_seen)
                              for s in sessions for i, (agent, _d) in enumerate(trees[s.id])})
         self.placements, w, h = layout(rows, size, aspect, bubble_size, caption_size)
@@ -365,7 +374,7 @@ class AgentsView:
 
     def draw_tile(self, cr, p):
         """Dark rounded tile with a neon border (the GIF is painted into it per frame)."""
-        a, r = self.alpha(p.session_id), min(10, p.h * 0.22)
+        a, r = self.fade.value, min(10, p.h * 0.22)
         cr.new_sub_path()
         cr.arc(p.x + p.w - r, p.y + r, r, -math.pi / 2, 0)
         cr.arc(p.x + p.w - r, p.y + p.h - r, r, 0, math.pi / 2)
@@ -400,9 +409,6 @@ class AgentsView:
         cr.move_to(x + 4, y + 1)
         PangoCairo.show_layout(cr, layout)
 
-    def alpha(self, sid):
-        return self.fade.value * (GHOST_ALPHA if sid in self.ghosts else 1.0)
-
     # -- drawing: the neon tiles, lines and text are drawn once into two cached layers;
     # each GIF frame only paints the frames between them (glow passes are expensive)
     def invalidate(self, *_):
@@ -430,9 +436,9 @@ class AgentsView:
             if p.kind == "sprite":
                 pad = max(2, round(p.h * 0.08))
                 surf = self.gif(self.path_for(p.depth)).surface(
-                    max(1, p.w - 2 * pad), max(1, p.h - 2 * pad), still=p.session_id in self.ghosts)
+                    max(1, p.w - 2 * pad), max(1, p.h - 2 * pad))
                 cr.set_source_surface(surf, EDGE + p.x + pad, EDGE + p.y + pad)
-                cr.paint_with_alpha(self.alpha(p.session_id))
+                cr.paint_with_alpha(self.fade.value)
         cr.set_source_surface(over, 0, 0)
         cr.paint()
         return True
@@ -455,7 +461,7 @@ class AgentsView:
             if p.kind == "sprite":
                 self.draw_badge(cr, p)
             elif p.kind == "caption":  # name tag: white text on a dark neon pill
-                a = self.alpha(p.session_id)
+                a = self.fade.value
                 pill(cr, p.x, p.y, p.w, p.h)
                 cr.set_source_rgba(0.043, 0.055, 0.078, a)
                 cr.fill_preserve()

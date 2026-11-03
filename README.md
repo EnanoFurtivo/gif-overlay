@@ -40,8 +40,8 @@ anywhere over the column fades it. New hooks apply to sessions started after ins
 
 Sessions started from another session in the desktop app (its side sessions) sit under that
 session like subagents: indented, smaller, with that level's sprite, keeping their own name,
-timer and "needs you" bubble. If the session they came from is idle it still shows, dimmed,
-so the tree stays together.
+timer and "needs you" bubble. While any of them is active, the session they came from shows
+as active too, even if it's idle itself.
 
 Agents started from a terminal show up too, but their bubble can't open a chat.
 With no `levelN` files at all, every level uses the main GIF. The hooks need `busctl`
