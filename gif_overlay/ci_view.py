@@ -12,6 +12,7 @@ POLL_ACTIVE, POLL_IDLE = 10, 30  # seconds between polls
 MAX_ROWS = 8
 V_GAP, H_GAP, PAD = 6, 6, 8
 CAPTION_MAX_W = 220  # long branch names get "…"
+STACK_GAP = 10       # between this column and the agents column below it
 BAR_H = 3
 FILL = (0.043, 0.055, 0.078)
 COLORS = {"running": NEON, "queued": NEON, "waiting": NEON, "over": (1.0, 0.66, 0.1),
@@ -29,6 +30,7 @@ class CiView:
         self.busy = False          # a poll is running on the worker thread
         self.failing = False       # the last poll failed (logged once per streak)
         self.rows, self.win_w, self.win_h = [], 0, 0
+        self.stacked = None        # (shown, height) the agents column was last moved for
         self.fade = Tween(1.0, self.invalidate, duration=0.2)
         self.layer = None
         self.frame_pending = False
@@ -213,11 +215,26 @@ class CiView:
             if gdkwin:
                 gdkwin.input_shape_combine_region(cairo.Region(), 0, 0)
         self.invalidate()
+        self.restack()
 
     def hide(self):
         self.rows = []
         self.gif.stop()
         self.win.hide()
+        self.restack()
+
+    # -- sharing a corner with the agents column: it goes right below this one
+    def stack_height(self, corner, geometry):
+        """How far a column in that corner of that monitor must move down to clear this one."""
+        if not self.rows or self.app.cfg["ci_corner"] != corner or self.geometry() != geometry:
+            return 0
+        return self.win_h - 2 * EDGE + STACK_GAP
+
+    def restack(self):
+        shown = (bool(self.rows), self.win_h)
+        if shown != self.stacked:
+            self.stacked = shown
+            self.app.agents.restack()
 
     def geometry(self):
         if self.monitor:

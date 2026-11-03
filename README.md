@@ -65,6 +65,7 @@ runs again on that branch. It's click-through and fades on hover like the rest.
 It uses your `gh` login (`gh auth token`) and polls every 10 s while something runs, every
 30 s otherwise; unchanged answers are ETag hits, which don't count against the rate limit.
 `--ci-size` sets the tile height (default 44), `--no-ci` turns it off.
+In the agents' corner (`--ci-corner top-right`), the agents column moves down below it.
 
 ## Requirements
 

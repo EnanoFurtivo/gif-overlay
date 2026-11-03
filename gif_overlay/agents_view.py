@@ -308,9 +308,8 @@ class AgentsView:
                                               else None)
             if mon:
                 GtkLayerShell.set_monitor(self.win, mon)
-            m = self.app.cfg["margin"]
-            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, m)
-            GtkLayerShell.set_margin(self.win, self.side_edge, m)
+            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, self.top_margin())
+            GtkLayerShell.set_margin(self.win, self.side_edge, self.app.cfg["margin"])
             self.win.show_all()
         region = cairo.Region()
         for p in self.placements:
@@ -326,6 +325,16 @@ class AgentsView:
             g.stop()
         self.win.hide()
 
+    def top_margin(self):
+        """Below the CI runs when they share this corner."""
+        ci = getattr(self.app, "ci", None)
+        corner = "top-right" if self.mirror else "top-left"
+        return self.app.cfg["margin"] + (ci.stack_height(corner, self.app.monitor_geometry())
+                                         if ci else 0)
+
+    def restack(self):
+        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, self.top_margin())
+
     # -- hover: the whole column (gaps included) is one area, everything fades together
     def rects(self):
         """['agents:x,y,w,h'] — the column of sprites and names, in KWin's coordinates."""
@@ -337,7 +346,7 @@ class AgentsView:
         left = mx + mw - m - self.win_w if self.mirror else mx + m  # the window's left edge
         x0, x1 = min(p.x for p in boxes), max(p.x + p.w for p in boxes)
         h = max(p.y + p.h for p in boxes)
-        return [f"agents:{left + EDGE + x0},{my + m + EDGE},{x1 - x0},{h}"]
+        return [f"agents:{left + EDGE + x0},{my + self.top_margin() + EDGE},{x1 - x0},{h}"]
 
     def hover(self, _name, on):
         self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)
