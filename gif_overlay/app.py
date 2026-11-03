@@ -24,7 +24,8 @@ PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
                 monitor=None, pixel=False, hidden=False, agents=True, agent_size=54,
                 gifs_dir="~/gifs", sound="~/.local/share/gif-overlay/sounds/notification.wav",
-                duck=0.3, water_minutes=20, agents_corner="top-right")
+                duck=0.3, water_minutes=20, agents_corner="top-right", ci=True, ci_repos=[],
+                ci_monitor=None, ci_gif="~/gifs/run.gif", ci_size=44)
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
                                "settings.json")
 # GLib.unix_signal_add only supports HUP, INT, TERM, USR1, USR2 and WINCH
@@ -84,6 +85,13 @@ p.add_argument("--sound", help="sound played with each bubble (WAV best; 'none' 
 p.add_argument("--duck", type=float,
                help="other apps' volume while the sound plays (0-1, default 0.3; 1 = don't dim)")
 p.add_argument("--water-minutes", type=float, help="water reminder every N minutes (0 = off)")
+p.add_argument("--ci", action=argparse.BooleanOptionalAction,
+               help="a tile per running GitHub Actions run of --ci-repo")
+p.add_argument("--ci-repo", dest="ci_repos", action="append", metavar="OWNER/REPO",
+               help="repo whose Actions runs are shown (repeatable; replaces the saved list)")
+p.add_argument("--ci-monitor", help="monitor for the CI runs, like --monitor (default: the GIF's)")
+p.add_argument("--ci-gif", help="GIF played in each CI run tile (default ~/gifs/run.gif)")
+p.add_argument("--ci-size", type=int, help="height of a CI run tile (px, default 44)")
 g = p.add_mutually_exclusive_group()
 for name in COMMANDS:
     g.add_argument("--" + name.replace("_", "-"), action="store_true",
@@ -148,6 +156,10 @@ if cfg["monitor"] is not None and str(cfg["monitor"]).lstrip("-").isdigit():
     cfg["monitor"] = int(cfg["monitor"])
 if cfg["monitor"] == -1:
     cfg["monitor"] = None
+if cfg["ci_monitor"] is not None and str(cfg["ci_monitor"]).lstrip("-").isdigit():
+    cfg["ci_monitor"] = int(cfg["ci_monitor"])
+if cfg["ci_monitor"] == -1:
+    cfg["ci_monitor"] = None
 if str(cfg["sound"]).lower() == "none":
     cfg["sound"] = ""
 if not cfg["gif"]:
@@ -160,6 +172,7 @@ from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, 
                                  clear_bg)
 from gif_overlay.bubble import Bubble
 from gif_overlay.agents_view import AgentsView
+from gif_overlay.ci_view import CiView
 from gif_overlay.sound import Sound
 from gif_overlay.water import WaterReminder
 
@@ -382,14 +395,15 @@ BUS_XML = f"""<node><interface name="{BUS_IFACE}">
 opacity = Tween(1.0, area.set_opacity, duration=0.20)
 
 def screen_rects():
-    """'name:x,y,w,h;...' of the main GIF and the agent sprites, in KWin's coordinates."""
+    """'name:x,y,w,h;...' of the main GIF, the agent sprites and the CI runs, in KWin's
+    coordinates."""
     gdkwin = win.get_window()
     if cfg["hidden"] or not gdkwin:
         return ""
     g = Gdk.Display.get_default().get_monitor_at_window(gdkwin).get_geometry()
     w, h = size()
     main = f"main:{g.x + g.width - cfg['margin'] - w},{g.y + g.height - bottom_margin() - h},{w},{h}"
-    return ";".join([main] + agents.rects())
+    return ";".join([main] + agents.rects() + ci.rects())
 
 def on_bus_call(_conn, _sender, _path, _iface, method, params, invocation):
     try:
@@ -397,11 +411,14 @@ def on_bus_call(_conn, _sender, _path, _iface, method, params, invocation):
             name, on = params.unpack()
             if name == "main":
                 opacity.to(cfg["hover_opacity"] if on else 1.0)
+            elif name == "ci":
+                ci.hover(name, on)
             else:
                 agents.hover(name, on)
         elif method == "Panels":
             panels[:] = parse_panels(params.unpack()[0])
             update_dock()
+            ci.place()
         elif method == "AgentEvent":
             agents.event(params.unpack()[0])
         else:
@@ -537,6 +554,7 @@ def on_notification(note):
 sound = Sound(sys.modules[__name__])
 bubble = Bubble(sys.modules[__name__])
 agents = AgentsView(sys.modules[__name__])
+ci = CiView(sys.modules[__name__])
 water = WaterReminder(sys.modules[__name__])
 
 
@@ -547,11 +565,13 @@ def show():
     update_dock()
     set_dnd(True)
     agents.refresh()
+    ci.refresh()
 
 def hide():
     win.hide()
     bubble.clear()
     agents.hide()
+    ci.hide()
     set_dnd(False)  # hidden: Plasma shows its own popups again
 
 def toggle():

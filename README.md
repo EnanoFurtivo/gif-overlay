@@ -21,6 +21,9 @@ Clippy style.
   or waiting for you, with its subagents stacked below it, smaller per level. When a
   session needs you it says so in a bubble; click it to jump to that chat in the Claude
   desktop app.
+- **CI runs** (bottom-right of a monitor you pick): a tile per running GitHub Actions run,
+  with its elapsed time, an estimate from past runs and a progress bar; it turns green / red
+  when it ends.
 
 ## Claude agent sprites
 
@@ -39,6 +42,24 @@ Agents started from a terminal show up too, but their bubble can't open a chat.
 With no `levelN` files at all, every level uses the main GIF. The hooks need `busctl`
 (part of systemd).
 
+## CI runs
+
+```bash
+gif-overlay --ci-repo owner/repo --ci-monitor 23MP55   # saved; repeat --ci-repo for more repos
+```
+
+Every queued or running GitHub Actions run of those repos (any workflow, any branch) gets a
+tile in the bottom-right corner of that monitor, stacking upwards, playing `~/gifs/run.gif`
+(`--ci-gif`). Next to it: `workflow · branch`, the elapsed time and `~estimate`, the median of
+the last 10 successful runs of that workflow on that branch (or on any branch). Past the
+estimate it turns amber and counts `+overtime`. When the run ends the tile shows ✓ / ✗ and the
+sound plays; successes leave after a minute, the rest after 10 minutes or when that workflow
+runs again on that branch. It's click-through and fades on hover like the rest.
+
+It uses your `gh` login (`gh auth token`) and polls every 10 s while something runs, every
+30 s otherwise; unchanged answers are ETag hits, which don't count against the rate limit.
+`--ci-size` sets the tile height (default 44), `--no-ci` turns it off.
+
 ## Requirements
 
 KDE Plasma 6 on Wayland, Python 3, and:
@@ -47,7 +68,8 @@ KDE Plasma 6 on Wayland, Python 3, and:
 sudo pacman -S gtk-layer-shell python-gobject python-cairo
 ```
 
-(Other distros: GTK 3 layer-shell, PyGObject and pycairo packages.)
+(Other distros: GTK 3 layer-shell, PyGObject and pycairo packages.) The CI runs also need
+the GitHub CLI (`gh`), logged in.
 
 ## Install
 
@@ -90,6 +112,11 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--sound` | `~/.local/share/gif-overlay/sounds/notification.wav` | played with every bubble (`none` = silent) |
 | `--duck` | 0.3 | other apps' volume while the sound plays (1 = don't dim) |
 | `--water-minutes` | 20 | water reminder interval (0 = off) |
+| `--ci-repo` | none | GitHub repo whose Actions runs are shown (repeatable) |
+| `--ci-monitor` | the GIF's | monitor for the CI runs, like `--monitor` |
+| `--ci-gif` | `~/gifs/run.gif` | GIF in each CI tile |
+| `--ci-size` | 44 | CI tile height (px) |
+| `--ci` / `--no-ci` | on | show the CI runs |
 
 Flags given on the command line are saved and become the new defaults.
 
@@ -114,7 +141,7 @@ Flags given on the command line are saved and become the new defaults.
 ## Tests
 
 ```bash
-python -I tests/test_helpers.py && python -I tests/test_agents.py
+python -I tests/test_helpers.py && python -I tests/test_agents.py && python -I tests/test_ci.py
 ```
 
 ## License
