@@ -25,7 +25,8 @@ DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, b
                 monitor=None, pixel=False, hidden=False, agents=True, agent_size=54,
                 gifs_dir="~/gifs", sound="~/.local/share/gif-overlay/sounds/notification.wav",
                 duck=0.3, water_minutes=20, agents_corner="top-right", ci=True, ci_repos=[],
-                ci_monitor=None, ci_gif="~/gifs/run.gif", ci_size=44)
+                ci_monitor=None, ci_gif="~/gifs/run.gif", ci_size=44,
+                ci_corner="bottom-right")
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
                                "settings.json")
 # GLib.unix_signal_add only supports HUP, INT, TERM, USR1, USR2 and WINCH
@@ -92,6 +93,8 @@ p.add_argument("--ci-repo", dest="ci_repos", action="append", metavar="OWNER/REP
 p.add_argument("--ci-monitor", help="monitor for the CI runs, like --monitor (default: the GIF's)")
 p.add_argument("--ci-gif", help="GIF played in each CI run tile (default ~/gifs/run.gif)")
 p.add_argument("--ci-size", type=int, help="height of a CI run tile (px, default 44)")
+p.add_argument("--ci-corner", choices=["bottom-right", "bottom-left", "top-right", "top-left"],
+               help="corner of the CI monitor the runs stack from (default bottom-right)")
 g = p.add_mutually_exclusive_group()
 for name in COMMANDS:
     g.add_argument("--" + name.replace("_", "-"), action="store_true",

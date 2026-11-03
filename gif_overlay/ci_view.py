@@ -1,4 +1,4 @@
-"""Bottom-right corner of a chosen monitor: one tile per running GitHub Actions run."""
+"""A corner of a chosen monitor: one tile per running GitHub Actions run."""
 import math, os, sys, threading, time
 
 from gif_overlay.agents_view import Gif
@@ -48,8 +48,13 @@ class CiView:
         GtkLayerShell.init_for_window(self.win)
         GtkLayerShell.set_namespace(self.win, "gif-overlay-ci")
         GtkLayerShell.set_layer(self.win, GtkLayerShell.Layer.OVERLAY)
-        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.BOTTOM, True)
-        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.RIGHT, True)
+        # the corner: newest run nearest to it, the tile on the screen-edge side of its pill
+        corner = app.cfg["ci_corner"]
+        self.top, self.left = corner.startswith("top"), corner.endswith("left")
+        self.v_edge = GtkLayerShell.Edge.TOP if self.top else GtkLayerShell.Edge.BOTTOM
+        self.h_edge = GtkLayerShell.Edge.LEFT if self.left else GtkLayerShell.Edge.RIGHT
+        GtkLayerShell.set_anchor(self.win, self.v_edge, True)
+        GtkLayerShell.set_anchor(self.win, self.h_edge, True)
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
         if app.visual:
             self.win.set_visual(app.visual)
@@ -177,6 +182,8 @@ class CiView:
         if not tiles:
             self.hide()
             return
+        if self.top:  # newest at the top, nearest the corner
+            tiles.reverse()
         self.rows = []
         for t in tiles:
             caption, timing, fraction, state = describe(t, self.estimate(t.run), now, multi)
@@ -218,24 +225,28 @@ class CiView:
             return g.x, g.y, g.width, g.height
         return self.app.monitor_geometry()
 
-    def bottom(self):
-        if self.monitor is None or self.geometry() == self.app.monitor_geometry():
-            # the GIF's corner: stack above it instead of on top of it
+    def vertical_margin(self):
+        """Distance from the top, or from the bottom: above any panel there (riding with an
+        auto-hide one), and above the GIF when sharing its corner."""
+        if self.top:
+            return self.app.cfg["margin"]
+        if not self.left and (self.monitor is None
+                              or self.geometry() == self.app.monitor_geometry()):
             return self.app.bottom_margin() + self.app.size()[1] + V_GAP
         return self.app.cfg["margin"] + panel_offset(self.app.panels, self.geometry())
 
     def place(self):
-        """Above any panel at the bottom of the monitor (and riding with an auto-hide one)."""
-        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.RIGHT, self.app.cfg["margin"])
-        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.BOTTOM, self.bottom())
+        GtkLayerShell.set_margin(self.win, self.h_edge, self.app.cfg["margin"])
+        GtkLayerShell.set_margin(self.win, self.v_edge, self.vertical_margin())
 
     # -- hover: the whole column fades together
     def rects(self):
         if not self.rows:
             return []
         mx, my, mw, mh = self.geometry()
-        x = mx + mw - self.app.cfg["margin"] - self.win_w + EDGE
-        y = my + mh - self.bottom() - self.win_h + EDGE
+        m, v = self.app.cfg["margin"], self.vertical_margin()
+        x = (mx + m if self.left else mx + mw - m - self.win_w) + EDGE
+        y = (my + v if self.top else my + mh - v - self.win_h) + EDGE
         return [f"ci:{x},{y},{self.win_w - 2 * EDGE},{self.win_h - 2 * EDGE}"]
 
     def hover(self, _name, on):
@@ -255,6 +266,12 @@ class CiView:
         self.frame_pending = False
         self.area.queue_draw()
         return False
+
+    def xs(self):
+        """(pill x, tile x)"""
+        if self.left:
+            return EDGE + self.tile_w + H_GAP, EDGE
+        return EDGE, EDGE + self.pill_w + H_GAP
 
     def row_y(self, i):
         size = self.app.cfg["ci_size"]
@@ -276,7 +293,7 @@ class CiView:
                 continue
             pad = max(2, round(h * 0.08))
             surf = self.gif.surface(max(1, self.tile_w - 2 * pad), max(1, h - 2 * pad))
-            cr.set_source_surface(surf, EDGE + self.pill_w + H_GAP + pad, self.row_y(i) + pad)
+            cr.set_source_surface(surf, self.xs()[1] + pad, self.row_y(i) + pad)
             # a queued run's runner hasn't picked it up yet: dimmer
             cr.paint_with_alpha(self.fade.value * (0.45 if state in ("queued", "waiting") else 1))
         return True
@@ -286,20 +303,21 @@ class CiView:
         for i, (caption, timing, fraction, state) in enumerate(self.rows):
             color, y = COLORS[state], self.row_y(i)
             # the pill: name, time, progress bar
-            rounded(cr, EDGE, y, self.pill_w, h, 10)
+            px, tx = self.xs()
+            rounded(cr, px, y, self.pill_w, h, 10)
             cr.set_source_rgba(*FILL, a)
             cr.fill_preserve()
             neon_stroke(cr, a, width=1, glow=0.5, color=color)
             ch, sh = caption.get_pixel_size()[1], timing.get_pixel_size()[1]
             top = y + (h - ch - sh - (BAR_H + 3 if fraction is not None else 0)) / 2
             cr.set_source_rgba(1, 1, 1, a)
-            cr.move_to(EDGE + PAD, top)
+            cr.move_to(px + PAD, top)
             PangoCairo.show_layout(cr, caption)
             cr.set_source_rgba(*(0.6 + 0.4 * c for c in color), a)
-            cr.move_to(EDGE + PAD, top + ch)
+            cr.move_to(px + PAD, top + ch)
             PangoCairo.show_layout(cr, timing)
             if fraction is not None:
-                bx, by, bw = EDGE + PAD, top + ch + sh + 3, self.pill_w - 2 * PAD
+                bx, by, bw = px + PAD, top + ch + sh + 3, self.pill_w - 2 * PAD
                 cr.rectangle(bx, by, bw, BAR_H)
                 cr.set_source_rgba(1, 1, 1, 0.12 * a)
                 cr.fill()
@@ -307,7 +325,6 @@ class CiView:
                 cr.set_source_rgba(*color, a)
                 cr.fill()
             # the tile: the GIF goes in it (see draw), or how it ended
-            tx = EDGE + self.pill_w + H_GAP
             rounded(cr, tx, y, self.tile_w, h, min(10, h * 0.22))
             cr.set_source_rgba(*FILL, a)
             cr.fill_preserve()

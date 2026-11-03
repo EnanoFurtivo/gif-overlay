@@ -21,7 +21,7 @@ Clippy style.
   or waiting for you, with its subagents stacked below it, smaller per level. When a
   session needs you it says so in a bubble; click it to jump to that chat in the Claude
   desktop app.
-- **CI runs** (bottom-right of a monitor you pick): a tile per running GitHub Actions run,
+- **CI runs** (a corner of a monitor you pick): a tile per running GitHub Actions run,
   with its elapsed time, an estimate from past runs and a progress bar; it turns green / red
   when it ends.
 
@@ -54,7 +54,8 @@ gif-overlay --ci-repo owner/repo --ci-monitor 23MP55   # saved; repeat --ci-repo
 ```
 
 Every queued or running GitHub Actions run of those repos (any workflow, any branch) gets a
-tile in the bottom-right corner of that monitor, stacking upwards, playing `~/gifs/run.gif`
+tile in the bottom-right corner of that monitor (`--ci-corner`), newest nearest the corner,
+playing `~/gifs/run.gif`
 (`--ci-gif`). Next to it: `workflow · branch`, the elapsed time and `~estimate`, the median of
 the last 10 successful runs of that workflow on that branch (or on any branch). Past the
 estimate it turns amber and counts `+overtime`. When the run ends the tile shows ✓ / ✗ and the
@@ -121,6 +122,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--ci-monitor` | the GIF's | monitor for the CI runs, like `--monitor` |
 | `--ci-gif` | `~/gifs/run.gif` | GIF in each CI tile |
 | `--ci-size` | 44 | CI tile height (px) |
+| `--ci-corner` | bottom-right | corner the CI runs stack from (`top-left`, `bottom-left`…) |
 | `--ci` / `--no-ci` | on | show the CI runs |
 
 Flags given on the command line are saved and become the new defaults.
