@@ -58,10 +58,12 @@ tile in the bottom-right corner of that monitor (`--ci-corner`), newest nearest 
 playing `~/gifs/run.gif`
 (`--ci-gif`). Next to it: `workflow · branch`, the elapsed time and `~estimate`, the median of
 the last 10 successful runs of that workflow on that branch (or on any branch). Past the
-estimate it turns amber and counts `+overtime`. On the right of the time, tags say what it runs
-on: the labels of the runners its jobs got (e.g. `pc` `casa`), then the kind the jobs asked for
-(`pesado`); labels every runner has, OS / arch and the repo's name are left out. Listing the
-runners needs admin access to the repo; without it the jobs' requested labels are shown. When the run ends the tile shows ✓ / ✗ and the
+estimate it turns amber and counts `+overtime`. Under each run its jobs hang like a file tree (skipped ones left out), each with
+its own tile, time, `~estimate` (that job's median in the last 10 successful runs) and bar,
+and tags on the right saying what it runs on: its runner's own labels (e.g. `pc`, `casa`), then
+the kind it asked for (`pesado`); labels every runner has, OS / arch and the repo's name are
+left out. Listing the runners needs admin access to the repo; without it the requested labels
+are shown. When the run ends the tile shows ✓ / ✗ and the
 sound plays; successes leave after a minute, the rest after 10 minutes or when that workflow
 runs again on that branch. It's click-through and fades on hover like the rest.
 

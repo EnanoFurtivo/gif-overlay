@@ -4,8 +4,8 @@ import os, sys, traceback
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import urllib.error
 
-from gif_overlay.ci import (CiTracker, describe, median_duration, normalize_repos, parse_time, poll,
-                            poll_jobs, runner_tags)
+from gif_overlay.ci import (GitHub, CiTracker, describe, describe_job, job_estimate, median_duration,
+                            normalize_repos, parse_time, poll, poll_jobs, runner_tags, shown_jobs)
 
 T0 = parse_time("2026-11-03T12:00:00Z")
 
@@ -205,7 +205,7 @@ class JobsGitHub:
 
 def test_poll_jobs_fetches_runners_once():
     gh = JobsGitHub()
-    jobs, runners, errors = poll_jobs(gh, [("o/r", 1), ("o/r", 5)], {})
+    jobs, runners, errors, _h = poll_jobs(gh, [("o/r", 1), ("o/r", 5)], {})
     assert list(jobs) == [1] and len(errors) == 1  # run 5's jobs failed: only its part lost
     assert runners == {"o/r": RUNNERS}
     gh.calls.clear()
@@ -214,11 +214,57 @@ def test_poll_jobs_fetches_runners_once():
 
 def test_poll_jobs_no_access_to_runners_is_not_an_error():
     gh = JobsGitHub(runners_code=403)
-    jobs, runners, errors = poll_jobs(gh, [("o/r", 1)], {})
+    jobs, runners, errors, _h = poll_jobs(gh, [("o/r", 1)], {})
     assert runners == {"o/r": None} and errors == [] and list(jobs) == [1]
     gh.calls.clear()
     poll_jobs(gh, [("o/r", 1)], runners)
     assert not any("/runners" in c for c in gh.calls)
+
+def test_poll_jobs_history_runs_fetched_unconditionally():
+    gh = JobsGitHub()
+    gh.get = lambda path, conditional=False, _g=gh.get: (gh.calls.append(("cond", conditional))
+                                                         or _g(path, conditional))
+    _j, _k, errors, hist = poll_jobs(gh, [], {}, history=[("o/r", 1), ("o/r", 5)])
+    assert list(hist) == [1] and len(errors) == 1 and ("cond", False) in gh.calls
+
+def test_conditional_cache_is_bounded():
+    gh = GitHub()
+    for i in range(400):
+        gh.etags[f"/p{i}"], gh.cache[f"/p{i}"] = "e", {}
+    gh.remember("/new", "e2", {"x": 1})
+    assert len(gh.cache) <= 300 and len(gh.etags) <= 300 and gh.cache["/new"] == {"x": 1}
+
+
+# ---------------------------------------------------------------- jobs
+def jb(name, status="in_progress", conclusion=None, start=T0, end=None, created=None):
+    return {"name": name, "status": status, "conclusion": conclusion,
+            "created_at": iso(created if created is not None else start),
+            "started_at": iso(start) if start is not None else None,
+            "completed_at": iso(end) if end is not None else None}
+
+def test_job_estimate_median_of_successful_runs():
+    hist = [{"id": i} for i in range(1, 13)]
+    by_run = {i: [jb("Web tests", "completed", "success", T0, T0 + 100 * i),
+                  jb("Lint", "completed", "failure", T0, T0 + 5)] for i in range(1, 13)}
+    del by_run[2]  # its jobs couldn't be read: just fewer samples
+    assert job_estimate(hist, by_run, "Web tests") == 600  # runs 1, 3..10
+    assert job_estimate(hist, by_run, "Lint") is None       # never succeeded
+    assert job_estimate(hist, {}, "Web tests") is None
+
+def test_describe_job():
+    assert describe_job(jb("Web tests"), 300, T0 + 90) == ("Web tests", "1:30 / ~5:00", 0.3, "running")
+    assert describe_job(jb("Web tests"), 60, T0 + 90)[1:] == ("1:30 / +0:30", 1.0, "over")
+    assert describe_job(jb("Web tests"), None, T0 + 90)[1:] == ("1:30", None, "running")
+    q = jb("Smoke", "queued", start=None, created=T0)
+    assert describe_job(q, 300, T0 + 20)[1:] == ("queued 0:20", None, "queued")
+    done = jb("Lint", "completed", "success", T0, T0 + 75)
+    assert describe_job(done, 300, T0 + 500)[1:] == ("✓ 1:15", 1.0, "success")
+    bad = jb("Lint", "completed", "failure", T0, T0 + 75)
+    assert describe_job(bad, 300, T0 + 500)[1:] == ("✗ failed 1:15", 1.0, "failure")
+
+def test_skipped_jobs_hidden():
+    jobs = [jb("a"), jb("b", "completed", "skipped", None, None, created=T0), jb("c", "queued")]
+    assert [j["name"] for j in shown_jobs(jobs)] == ["a", "c"]
 
 
 # ---------------------------------------------------------------- texts

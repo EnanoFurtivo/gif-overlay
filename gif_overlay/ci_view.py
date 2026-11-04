@@ -1,17 +1,21 @@
 """A corner of a chosen monitor: one tile per running GitHub Actions run."""
 import math, os, sys, threading, time
 
+from gif_overlay.agents import INDENT
 from gif_overlay.agents_view import Gif
 from gif_overlay.bubble import EDGE
-from gif_overlay.ci import CiTracker, GitHub, describe, median_duration, poll, poll_jobs, runner_tags
+from gif_overlay.ci import (ESTIMATE_RUNS, CiTracker, GitHub, describe, describe_job, job_estimate,
+                            median_duration, poll, poll_jobs, runner_tags, shown_jobs)
 from gif_overlay.gtkbits import (NEON, Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo, Tween,
                                  cairo, clear_bg, neon_stroke)
 from gif_overlay.helpers import panel_offset
 
 POLL_ACTIVE, POLL_IDLE = 10, 30  # seconds between polls
 MAX_ROWS = 8
-V_GAP, H_GAP, PAD = 6, 6, 8
+V_GAP, H_GAP, PAD = 6, 6, 8  # V_GAP: between one run (with its jobs) and the next
+JOB_GAP, JOB_RATIO = 3, 0.7   # a job row: under its run, 70% of its height
 CAPTION_MAX_W = 220  # long branch names get "…"
+JOB_NAME_MAX_W = 170
 STACK_GAP = 10       # between this column and the agents column below it
 BAR_H = 3
 TAG_PAD, TAG_GAP = 4, 3  # the runner tags right of the time: inner padding, between them
@@ -29,6 +33,7 @@ class CiView:
         self.history = {}          # (repo, workflow id) -> successful runs, newest first
         self.stale = set()         # histories to (re)fetch on the next poll
         self.runners = {}          # repo -> runner name -> labels (None: not allowed to list)
+        self.past_jobs = {}        # run id -> jobs, for the newest runs of each history
         self.busy = False          # a poll is running on the worker thread
         self.failing = False       # the last poll failed (logged once per streak)
         self.rows, self.win_w, self.win_h = [], 0, 0
@@ -81,15 +86,19 @@ class CiView:
         tracked = [(t.run["repo"], t.run["id"]) for t in self.tracker.runs.values()
                    if t.finished_at is None]
         args = (self.gh, list(self.app.cfg["ci_repos"]), tracked, sorted(self.stale))
-        runners = dict(self.runners)
+        runners, histories, have = dict(self.runners), dict(self.history), set(self.past_jobs)
         self.busy = True
 
         def work():
             try:
                 result = poll(*args)
-                jobs, known, errors = poll_jobs(self.gh, [(r["repo"], r["id"]) for r in result[0]],
-                                                runners)
-                result = result[:4] + (result[4] + errors, jobs, known)
+                past = {(repo, r["id"]) for (repo, _wf), runs in [*histories.items(),
+                                                                  *result[3].items()]
+                        for r in runs[:ESTIMATE_RUNS] if r["id"] not in have}
+                jobs, known, errors, past = poll_jobs(
+                    self.gh, [(r["repo"], r["id"]) for r in result[0] + result[1]], runners,
+                    sorted(past))
+                result = result[:4] + (result[4] + errors, jobs, known, past)
             except Exception as e:  # offline, rate limited, gh logged out...
                 result = e
             GLib.idle_add(self.polled, result)
@@ -118,9 +127,11 @@ class CiView:
         self.failing = bool(errors)
         if isinstance(result, Exception):
             return POLL_IDLE
-        active, ended, gone, found, _errors, jobs, self.runners = result
+        active, ended, gone, found, _errors, jobs, self.runners, past = result
         self.history.update(found)
         self.stale -= set(found)
+        keep = {r["id"] for runs in self.history.values() for r in runs[:ESTIMATE_RUNS]}
+        self.past_jobs = {rid: js for rid, js in {**self.past_jobs, **past}.items() if rid in keep}
         now = time.time()
         self.tracker.update(active, now)
         finished = False
@@ -130,10 +141,10 @@ class CiView:
                 self.stale.add((run["repo"], run["workflow_id"]))  # one more for the estimate
         for run_id in gone:
             self.tracker.forget(run_id)
-        for run in active:
-            tile = self.tracker.runs.get(run["id"])
-            if tile and run["id"] in jobs:
-                tile.tags = runner_tags(jobs[run["id"]], self.runners.get(run["repo"]), run["repo"])
+        for run_id, run_jobs in jobs.items():
+            tile = self.tracker.runs.get(run_id)
+            if tile:
+                tile.jobs = run_jobs
         for run in active:
             if (run["repo"], run["workflow_id"]) not in self.history:
                 self.stale.add((run["repo"], run["workflow_id"]))
@@ -197,21 +208,21 @@ class CiView:
         if self.top:  # newest at the top, nearest the corner
             tiles.reverse()
         self.rows = []
-        for t in tiles:
+        for t in tiles:  # each run, then its jobs under it like a file tree
             caption, timing, fraction, state = describe(t, self.estimate(t.run), now, multi)
-            self.rows.append((self.text(caption, "Sans Bold 8", CAPTION_MAX_W),
-                              self.text(timing, "Sans 8"),
-                              [self.text(tag, "Sans Bold 7") for tag in t.tags],
-                              fraction, state))
-        size = cfg["ci_size"]
-        self.tile_w = round(size * min(1.8, max(0.6, self.gif.aspect())))
-        self.pill_w = max([max(c.get_pixel_size()[0],
-                               s.get_pixel_size()[0] + (2 * PAD + tags_width(g) if g else 0))
-                           for c, s, g, _f, _st in self.rows] + [110]) + 2 * PAD
-        n = len(self.rows)
-        content_w, content_h = self.pill_w + H_GAP + self.tile_w, n * size + (n - 1) * V_GAP
-        self.win_w, self.win_h = content_w + 2 * EDGE, content_h + 2 * EDGE
-        if any(st in ("running", "over", "queued", "waiting") for *_x, st in self.rows):
+            self.rows.append(Row("run", self.text(caption, "Sans Bold 8", CAPTION_MAX_W),
+                                 self.text(timing, "Sans 8"), [], fraction, state))
+            repo, history = t.run["repo"], self.history.get((t.run["repo"], t.run["workflow_id"]), [])
+            for job in shown_jobs(t.jobs):
+                name, timing, fraction, state = describe_job(
+                    job, job_estimate(history, self.past_jobs, job.get("name")), now)
+                tags = runner_tags([job], self.runners.get(repo), repo)
+                self.rows.append(Row("job", self.text(name, "Sans Bold 7", JOB_NAME_MAX_W),
+                                     self.text(timing, "Sans 7"),
+                                     [self.text(tag, "Sans Bold 6.5") for tag in tags],
+                                     fraction, state))
+        self.layout_rows()
+        if any(r.state in ("running", "over", "queued", "waiting") for r in self.rows):
             self.gif.start()
         else:
             self.gif.stop()
@@ -228,6 +239,32 @@ class CiView:
                 gdkwin.input_shape_combine_region(cairo.Region(), 0, 0)
         self.invalidate()
         self.restack()
+
+    def layout_rows(self):
+        """Sizes and positions: tiles flush with the screen edge, jobs indented one step."""
+        size = self.app.cfg["ci_size"]
+        aspect = min(1.8, max(0.6, self.gif.aspect()))
+        heights = {"run": size, "job": round(size * JOB_RATIO)}
+        pill_w = {"run": 110, "job": 90}
+        for r in self.rows:
+            tags = tags_width(r.tags)
+            pill_w[r.kind] = max(pill_w[r.kind], r.caption.get_pixel_size()[0],
+                                 r.timing.get_pixel_size()[0] + (PAD + tags if tags else 0))
+        pill_w = {k: w + 2 * PAD for k, w in pill_w.items()}
+        tile_w = {k: round(h * aspect) for k, h in heights.items()}
+        indent = {"run": 0, "job": INDENT}
+        content_w = max(indent[r.kind] + tile_w[r.kind] + H_GAP + pill_w[r.kind] for r in self.rows)
+        y = 0
+        for i, r in enumerate(self.rows):
+            if i:
+                y += V_GAP if r.kind == "run" else JOB_GAP
+            r.y, r.h, r.tile_w, r.pill_w = y, heights[r.kind], tile_w[r.kind], pill_w[r.kind]
+            r.tile_x = content_w - indent[r.kind] - r.tile_w  # measured from the left...
+            r.pill_x = r.tile_x - H_GAP - r.pill_w
+            if self.left:  # ...or mirrored
+                r.tile_x, r.pill_x = content_w - r.tile_x - r.tile_w, content_w - r.pill_x - r.pill_w
+            y += r.h
+        self.win_w, self.win_h = content_w + 2 * EDGE, y + 2 * EDGE
 
     def hide(self):
         self.rows = []
@@ -296,16 +333,6 @@ class CiView:
         self.area.queue_draw()
         return False
 
-    def xs(self):
-        """(pill x, tile x)"""
-        if self.left:
-            return EDGE + self.tile_w + H_GAP, EDGE
-        return EDGE, EDGE + self.pill_w + H_GAP
-
-    def row_y(self, i):
-        size = self.app.cfg["ci_size"]
-        return EDGE + i * (size + V_GAP)
-
     def draw(self, _w, cr):
         if not self.rows:
             return True
@@ -316,38 +343,38 @@ class CiView:
             self.layer = (size, surf)
         cr.set_source_surface(self.layer[1], 0, 0)
         cr.paint()
-        h = self.app.cfg["ci_size"]
-        for i, (*_x, state) in enumerate(self.rows):
-            if state in GLYPHS:
+        for r in self.rows:
+            if r.state in GLYPHS:
                 continue
-            pad = max(2, round(h * 0.08))
-            surf = self.gif.surface(max(1, self.tile_w - 2 * pad), max(1, h - 2 * pad))
-            cr.set_source_surface(surf, self.xs()[1] + pad, self.row_y(i) + pad)
-            # a queued run's runner hasn't picked it up yet: dimmer
-            cr.paint_with_alpha(self.fade.value * (0.45 if state in ("queued", "waiting") else 1))
+            pad = max(2, round(r.h * 0.08))
+            surf = self.gif.surface(max(1, r.tile_w - 2 * pad), max(1, r.h - 2 * pad))
+            cr.set_source_surface(surf, EDGE + r.tile_x + pad, EDGE + r.y + pad)
+            # nothing has picked it up yet: dimmer
+            cr.paint_with_alpha(self.fade.value * (0.45 if r.state in ("queued", "waiting") else 1))
         return True
 
     def paint_layer(self, cr):
-        a, h = self.fade.value, self.app.cfg["ci_size"]
-        for i, (caption, timing, tags, fraction, state) in enumerate(self.rows):
-            color, y = COLORS[state], self.row_y(i)
-            # the pill: name, time, progress bar
-            px, tx = self.xs()
-            rounded(cr, px, y, self.pill_w, h, 10)
+        a = self.fade.value
+        cr.translate(EDGE, EDGE)
+        self.paint_tree_lines(cr)
+        for r in self.rows:
+            color, y, h, px, tx = COLORS[r.state], r.y, r.h, r.pill_x, r.tile_x
+            # the pill: name, time (and where it runs), progress bar
+            rounded(cr, px, y, r.pill_w, h, 10 if r.kind == "run" else 8)
             cr.set_source_rgba(*FILL, a)
             cr.fill_preserve()
             neon_stroke(cr, a, width=1, glow=0.5, color=color)
-            ch, sh = caption.get_pixel_size()[1], timing.get_pixel_size()[1]
-            top = y + (h - ch - sh - (BAR_H + 3 if fraction is not None else 0)) / 2
+            ch, sh = r.caption.get_pixel_size()[1], r.timing.get_pixel_size()[1]
+            bar = BAR_H + (3 if r.kind == "run" else 2)
+            top = y + (h - ch - sh - (bar if r.fraction is not None else 0)) / 2
             cr.set_source_rgba(1, 1, 1, a)
             cr.move_to(px + PAD, top)
-            PangoCairo.show_layout(cr, caption)
+            PangoCairo.show_layout(cr, r.caption)
             cr.set_source_rgba(*(0.6 + 0.4 * c for c in color), a)
             cr.move_to(px + PAD, top + ch)
-            PangoCairo.show_layout(cr, timing)
-            # where it runs: little tags flush with the pill's right edge, on the time's line
-            x = px + self.pill_w - PAD - tags_width(tags)
-            for tag in tags:
+            PangoCairo.show_layout(cr, r.timing)
+            x = px + r.pill_w - PAD - tags_width(r.tags)  # flush with the pill's right edge
+            for tag in r.tags:
                 w, th = tag.get_pixel_size()
                 ty = top + ch + (sh - th) / 2
                 rounded(cr, x, ty - 1, w + 2 * TAG_PAD, th + 2, (th + 2) / 2)
@@ -360,25 +387,49 @@ class CiView:
                 cr.move_to(x + TAG_PAD, ty)
                 PangoCairo.show_layout(cr, tag)
                 x += w + 2 * TAG_PAD + TAG_GAP
-            if fraction is not None:
-                bx, by, bw = px + PAD, top + ch + sh + 3, self.pill_w - 2 * PAD
+            if r.fraction is not None:
+                bx, by, bw = px + PAD, top + ch + sh + bar - BAR_H, r.pill_w - 2 * PAD
                 cr.rectangle(bx, by, bw, BAR_H)
                 cr.set_source_rgba(1, 1, 1, 0.12 * a)
                 cr.fill()
-                cr.rectangle(bx, by, bw * max(0.0, min(1.0, fraction)), BAR_H)
+                cr.rectangle(bx, by, bw * max(0.0, min(1.0, r.fraction)), BAR_H)
                 cr.set_source_rgba(*color, a)
                 cr.fill()
             # the tile: the GIF goes in it (see draw), or how it ended
-            rounded(cr, tx, y, self.tile_w, h, min(10, h * 0.22))
+            rounded(cr, tx, y, r.tile_w, h, min(10, h * 0.22))
             cr.set_source_rgba(*FILL, a)
             cr.fill_preserve()
-            neon_stroke(cr, a, color=color)
-            if state in GLYPHS:
-                glyph = self.text(GLYPHS[state], f"Sans Bold {max(8, round(h * 0.4))}")
+            neon_stroke(cr, a, width=1.6 if r.kind == "run" else 1.2, color=color)
+            if r.state in GLYPHS:
+                glyph = self.text(GLYPHS[r.state], f"Sans Bold {max(7, round(h * 0.4))}")
                 gw, gh = glyph.get_pixel_size()
                 cr.set_source_rgba(*color, a)
-                cr.move_to(tx + (self.tile_w - gw) / 2, y + (h - gh) / 2)
+                cr.move_to(tx + (r.tile_w - gw) / 2, y + (h - gh) / 2)
                 PangoCairo.show_layout(cr, glyph)
+
+    def paint_tree_lines(self, cr):
+        """File-tree elbows from each run's tile down to its jobs' tiles."""
+        run = None
+        for r in self.rows:
+            if r.kind == "run":
+                run = r
+                continue
+            if self.left:  # trunk near the run tile's screen-edge side, elbow into the job's
+                trunk, edge = run.tile_x + INDENT // 2, r.tile_x - 2
+            else:
+                trunk, edge = run.tile_x + run.tile_w - INDENT // 2, r.tile_x + r.tile_w + 2
+            cr.move_to(trunk, run.y + run.h + 1)
+            cr.line_to(trunk, r.y + r.h / 2)
+            cr.line_to(edge, r.y + r.h / 2)
+        neon_stroke(cr, self.fade.value, width=1, glow=0.5)
+
+
+class Row:
+    """One line of the column: a run, or one of its jobs (positions set by layout_rows)."""
+    def __init__(self, kind, caption, timing, tags, fraction, state):
+        self.kind, self.caption, self.timing, self.tags = kind, caption, timing, tags
+        self.fraction, self.state = fraction, state
+        self.y = self.h = self.tile_x = self.tile_w = self.pill_x = self.pill_w = 0
 
 
 def tags_width(tags):

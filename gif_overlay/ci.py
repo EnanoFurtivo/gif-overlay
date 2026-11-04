@@ -9,6 +9,7 @@ FAILED = {"failure", "timed_out", "startup_failure"}
 ESTIMATE_RUNS = 10
 API = "https://api.github.com"
 ACTIVE_STATUSES = ("in_progress", "queued", "waiting")
+CACHE_MAX = 300  # conditional answers kept for their ETags
 REPO = re.compile(r"[\w.-]+/[\w.-]+")
 GENERIC_LABELS = {"self-hosted", "linux", "windows", "macos", "x64", "arm64", "arm"}
 
@@ -75,10 +76,27 @@ def runner_tags(jobs, runners, repo):
     return where + [l for l in kind if l not in where]
 
 
+def job_duration(job):
+    return max(0.0, parse_time(job["completed_at"]) - parse_time(job["started_at"]))
+
+
+def job_estimate(history, jobs_by_run, name, n=ESTIMATE_RUNS):
+    """Median duration of the job called `name` in the newest n successful runs of its
+    workflow whose jobs are known (`jobs_by_run`: run id -> jobs)."""
+    took = [job_duration(j) for r in history[:n] for j in jobs_by_run.get(r["id"], [])
+            if j.get("name") == name and j.get("conclusion") == "success"
+            and j.get("started_at") and j.get("completed_at")]
+    return statistics.median(took) if took else None
+
+
+def shown_jobs(jobs):
+    return [j for j in jobs if j.get("conclusion") != "skipped"]
+
+
 class Tile:
     def __init__(self, run):
         self.run, self.finished_at = run, None
-        self.tags = []  # what it runs on (runner_tags)
+        self.jobs = []  # its jobs, as last read
 
     def key(self):  # a newer run of the same workflow on the same branch replaces this one
         return self.run.get("repo"), self.run["workflow_id"], self.run.get("head_branch")
@@ -163,25 +181,47 @@ def describe(tile, estimate, now, multi_repo=False):
     if multi_repo and run.get("repo"):
         caption = f"{run['repo'].split('/')[-1]} · {caption}"
     if tile.finished_at is not None:
-        took, conclusion = format_elapsed(duration(run)), run.get("conclusion")
-        if conclusion == "success":
-            return caption, f"✓ {took}", 1.0, "success"
-        if conclusion in FAILED:
-            return caption, f"✗ failed {took}", 1.0, "failure"
-        return caption, f"{conclusion or 'done'} {took}", 1.0, "cancelled"
-    status = run.get("status")
-    if status != "in_progress":  # queued, waiting (for an approval), pending, requested
-        waited = max(0.0, now - (parse_time(run.get("created_at")) or now))
-        label = "waiting" if status == "waiting" else "queued"
-        return caption, f"{label} {format_elapsed(waited)}", None, label
+        return (caption,) + ended(run.get("conclusion"), duration(run))
+    if run.get("status") != "in_progress":  # queued, waiting (for an approval), pending...
+        return (caption,) + waiting(run, now)
     start = parse_time(run.get("run_started_at")) or parse_time(run.get("created_at")) or now
+    return (caption,) + going(start, estimate, now)
+
+
+def describe_job(job, estimate, now):
+    """(name, time text, progress 0-1 or None, state) for one job of a run."""
+    name = job.get("name") or "job"
+    if job.get("status") == "completed":
+        took = job_duration(job) if job.get("started_at") and job.get("completed_at") else 0
+        return (name,) + ended(job.get("conclusion"), took)
+    if job.get("status") != "in_progress":
+        return (name,) + waiting(job, now)
+    return (name,) + going(parse_time(job.get("started_at")) or now, estimate, now)
+
+
+def ended(conclusion, took):
+    took = format_elapsed(took)
+    if conclusion == "success":
+        return f"✓ {took}", 1.0, "success"
+    if conclusion in FAILED:
+        return f"✗ failed {took}", 1.0, "failure"
+    return f"{conclusion or 'done'} {took}", 1.0, "cancelled"
+
+
+def waiting(item, now):
+    waited = max(0.0, now - (parse_time(item.get("created_at")) or now))
+    label = "waiting" if item.get("status") == "waiting" else "queued"
+    return f"{label} {format_elapsed(waited)}", None, label
+
+
+def going(start, estimate, now):
     elapsed = max(0.0, now - start)
     if estimate is None:
-        return caption, format_elapsed(elapsed), None, "running"
+        return format_elapsed(elapsed), None, "running"
     if elapsed <= estimate:
-        return (caption, f"{format_elapsed(elapsed)} / ~{format_elapsed(estimate)}",
+        return (f"{format_elapsed(elapsed)} / ~{format_elapsed(estimate)}",
                 elapsed / estimate if estimate else 1.0, "running")
-    return caption, f"{format_elapsed(elapsed)} / +{format_elapsed(elapsed - estimate)}", 1.0, "over"
+    return f"{format_elapsed(elapsed)} / +{format_elapsed(elapsed - estimate)}", 1.0, "over"
 
 
 # ---------------------------------------------------------------- fetching (worker thread)
@@ -207,7 +247,7 @@ class GitHub:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.load(resp)
                 if conditional and resp.headers.get("ETag"):
-                    self.etags[path], self.cache[path] = resp.headers["ETag"], data
+                    self.remember(path, resp.headers["ETag"], data)
                 return data
         except urllib.error.HTTPError as e:
             if e.code == 304 and path in self.cache:
@@ -215,6 +255,17 @@ class GitHub:
             if e.code == 401:
                 self.token = None  # re-read it next time (gh may have refreshed it)
             raise
+
+
+    def remember(self, path, etag, data):
+        """Keep an answer for its ETag; the oldest go past CACHE_MAX (one per run's jobs...)."""
+        self.etags.pop(path, None)
+        self.cache.pop(path, None)
+        while len(self.cache) >= CACHE_MAX:
+            old = next(iter(self.cache))
+            del self.cache[old]
+            self.etags.pop(old, None)
+        self.etags[path], self.cache[path] = etag, data
 
 
 def poll(gh, repos, tracked, histories):
@@ -254,15 +305,17 @@ def poll(gh, repos, tracked, histories):
     return active, ended, gone, found, errors
 
 
-def poll_jobs(gh, runs, known):
+def poll_jobs(gh, runs, known, history=()):
     """The jobs of (repo, run id) pairs, and the runners of their repos when one of those jobs'
-    runners isn't in `known` (repo -> runner name -> labels, None = not allowed to list them):
-    (jobs by run id, the updated `known`, errors)."""
-    jobs, known, errors = {}, dict(known), []
-    for repo, run_id in runs:
+    runners isn't in `known` (repo -> runner name -> labels, None = not allowed to list them),
+    and the jobs of `history` runs (finished, so not worth an ETag): (jobs by run id, the
+    updated `known`, errors, history jobs by run id)."""
+    jobs, known, errors, past = {}, dict(known), [], {}
+    for (repo, run_id), conditional, into in ([(r, True, jobs) for r in runs]
+                                             + [(r, False, past) for r in history]):
         try:
-            jobs[run_id] = gh.get(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
-                                  conditional=True).get("jobs", [])
+            into[run_id] = gh.get(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                                  conditional=conditional).get("jobs", [])
         except Exception as e:
             errors.append(f"{repo} run {run_id} jobs: {e}")
     for repo in {repo for repo, _ in runs}:
@@ -281,4 +334,4 @@ def poll_jobs(gh, runs, known):
                 errors.append(f"{repo} runners: {e}")
         except Exception as e:
             errors.append(f"{repo} runners: {e}")
-    return jobs, known, errors
+    return jobs, known, errors, past
