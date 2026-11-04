@@ -116,6 +116,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--pixel` / `--no-pixel` | off | nearest-neighbour scaling for pixel art |
 | `--bubbles` / `--no-bubbles` | on | notifications as speech bubbles, or keep Plasma's popups |
 | `--agents` / `--no-agents` | on | Claude agent sprites in the top-left corner |
+| `--agents-monitor` | the GIF's | monitor for the agents column, like `--monitor` |
 | `--agents-corner` | top-right | `top-right` or `top-left` |
 | `--agent-size` | 54 | height of a session's sprite (px) |
 | `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |

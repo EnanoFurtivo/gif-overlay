@@ -100,6 +100,7 @@ class AgentsView:
         GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
         # top-right: the column is mirrored (hugs the right edge, bubbles open to the left)
         self.mirror = app.cfg["agents_corner"] == "top-right"
+        self.monitor, self.warned_monitor = None, False  # the monitor it's shown on
         self.side_edge = GtkLayerShell.Edge.RIGHT if self.mirror else GtkLayerShell.Edge.LEFT
         GtkLayerShell.set_anchor(self.win, self.side_edge, True)
         GtkLayerShell.set_keyboard_mode(self.win, GtkLayerShell.KeyboardMode.NONE)
@@ -107,6 +108,11 @@ class AgentsView:
             self.win.set_visual(app.visual)
         self.win.set_app_paintable(True)
         self.win.connect("draw", clear_bg)
+        # its monitor going away closes a layer surface; keep the window, show it again
+        self.win.connect("delete-event", lambda *_: self.hide() or True)
+        display = Gdk.Display.get_default()
+        display.connect("monitor-added", self.on_monitors_changed)
+        display.connect("monitor-removed", self.on_monitors_changed)
         self.area = Gtk.DrawingArea()
         self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         self.area.connect("draw", self.draw)
@@ -302,10 +308,7 @@ class AgentsView:
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         if not self.win.get_visible():
-            display = Gdk.Display.get_default()
-            gdkwin = self.app.win.get_window()
-            mon = self.app.pinned_monitor or (display.get_monitor_at_window(gdkwin) if gdkwin
-                                              else None)
+            self.monitor = mon = self.pick_monitor()
             if mon:
                 GtkLayerShell.set_monitor(self.win, mon)
             GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, self.top_margin())
@@ -325,11 +328,37 @@ class AgentsView:
             g.stop()
         self.win.hide()
 
+    def on_monitors_changed(self, *_):
+        if self.win.get_visible():  # show it again on the right monitor
+            self.hide()
+            GLib.idle_add(lambda: self.refresh() and False)
+
+    def pick_monitor(self):
+        """--agents-monitor, else the GIF's."""
+        want = self.app.cfg["agents_monitor"]
+        mon = self.app.find_monitor(want) if want is not None else None
+        if want is not None and not mon and not self.warned_monitor:
+            print(f"gif-overlay: agents monitor {want!r} not found, using the GIF's",
+                  file=sys.stderr)
+            self.warned_monitor = True
+        if mon:
+            self.warned_monitor = False
+            return mon
+        gdkwin = self.app.win.get_window()
+        return self.app.pinned_monitor or (Gdk.Display.get_default().get_monitor_at_window(gdkwin)
+                                           if gdkwin else None)
+
+    def geometry(self):
+        if self.monitor:
+            g = self.monitor.get_geometry()
+            return g.x, g.y, g.width, g.height
+        return self.app.monitor_geometry()
+
     def top_margin(self):
         """Below the CI runs when they share this corner."""
         ci = getattr(self.app, "ci", None)
         corner = "top-right" if self.mirror else "top-left"
-        return self.app.cfg["margin"] + (ci.stack_height(corner, self.app.monitor_geometry())
+        return self.app.cfg["margin"] + (ci.stack_height(corner, self.geometry())
                                          if ci else 0)
 
     def restack(self):
@@ -341,7 +370,7 @@ class AgentsView:
         boxes = [p for p in self.placements if p.kind != "bubble"]
         if not boxes:
             return []
-        mx, my, mw, _ = self.app.monitor_geometry()
+        mx, my, mw, _ = self.geometry()
         m = self.app.cfg["margin"]
         left = mx + mw - m - self.win_w if self.mirror else mx + m  # the window's left edge
         x0, x1 = min(p.x for p in boxes), max(p.x + p.w for p in boxes)

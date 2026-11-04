@@ -24,7 +24,7 @@ PIDFILE = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "gif-overlay
 DEFAULTS = dict(gif=None, scale=0.3, step=0.05, margin=20, hover_opacity=0.25, bubbles=True,
                 monitor=None, pixel=False, hidden=False, agents=True, agent_size=54,
                 gifs_dir="~/gifs", sound="~/.local/share/gif-overlay/sounds/notification.wav",
-                duck=0.3, water_minutes=20, agents_corner="top-right", ci=True, ci_repos=[],
+                duck=0.3, water_minutes=20, agents_corner="top-right", agents_monitor=None, ci=True, ci_repos=[],
                 ci_monitor=None, ci_gif="~/gifs/run.gif", ci_size=44,
                 ci_corner="bottom-right")
 CLAUDE_SETTINGS = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
@@ -78,6 +78,8 @@ p.add_argument("--pixel", action=argparse.BooleanOptionalAction,
                help="nearest-neighbour scaling (for pixel art)")
 p.add_argument("--agents", action=argparse.BooleanOptionalAction,
                help="a sprite per running Claude agent in the top-left corner")
+p.add_argument("--agents-monitor",
+               help="monitor for the agents column, like --monitor (default: the GIF's)")
 p.add_argument("--agents-corner", choices=["top-right", "top-left"],
                help="where the agent sprites live (default top-right)")
 p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px, default 54)")
@@ -161,10 +163,11 @@ if cfg["monitor"] == -1:
     cfg["monitor"] = None
 from gif_overlay.ci import normalize_repos
 cfg["ci_repos"] = normalize_repos(cfg["ci_repos"])
-if cfg["ci_monitor"] is not None and str(cfg["ci_monitor"]).lstrip("-").isdigit():
-    cfg["ci_monitor"] = int(cfg["ci_monitor"])
-if cfg["ci_monitor"] == -1:
-    cfg["ci_monitor"] = None
+for key in ("agents_monitor", "ci_monitor"):
+    if cfg[key] is not None and str(cfg[key]).lstrip("-").isdigit():
+        cfg[key] = int(cfg[key])
+    if cfg[key] == -1:
+        cfg[key] = None
 if str(cfg["sound"]).lower() == "none":
     cfg["sound"] = ""
 if not cfg["gif"]:
