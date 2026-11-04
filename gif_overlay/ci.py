@@ -10,6 +10,7 @@ ESTIMATE_RUNS = 10
 API = "https://api.github.com"
 ACTIVE_STATUSES = ("in_progress", "queued", "waiting")
 REPO = re.compile(r"[\w.-]+/[\w.-]+")
+GENERIC_LABELS = {"self-hosted", "linux", "windows", "macos", "x64", "arm64", "arm"}
 
 
 def parse_time(iso):
@@ -48,9 +49,36 @@ def normalize_repos(value):
     return repos
 
 
+def runner_tags(jobs, runners, repo):
+    """What a run runs on, e.g. ['pc', 'casa', 'pesado']: the labels of the runners of its
+    running jobs (else its waiting jobs, else all of them), where first (the runner's own
+    labels), then the kind (what the jobs asked for). Labels every runner has, OS / arch and
+    the repo's name are left out. `runners` = runner name -> labels, None when unknown."""
+    for wanted in ({"in_progress"}, {"queued", "waiting", "pending", "requested"}, None):
+        picked = [j for j in jobs if wanted is None or j.get("status") in wanted]
+        if picked:
+            break
+    runners = runners or {}
+    shared = set.intersection(*map(set, runners.values())) if len(runners) > 1 else set()
+    skip = lambda l: (l.lower() in GENERIC_LABELS or l in shared
+                      or l.lower() == repo.split("/")[-1].lower())
+    where, kind = [], []
+    for j in picked:
+        asked = j.get("labels") or []
+        has = runners.get(j.get("runner_name"))
+        for l in has or []:
+            if l not in asked and not skip(l) and l not in where:
+                where.append(l)
+        for l in (asked if has is None else [l for l in asked if l in has]):
+            if not skip(l) and l not in kind:
+                kind.append(l)
+    return where + [l for l in kind if l not in where]
+
+
 class Tile:
     def __init__(self, run):
         self.run, self.finished_at = run, None
+        self.tags = []  # what it runs on (runner_tags)
 
     def key(self):  # a newer run of the same workflow on the same branch replaces this one
         return self.run.get("repo"), self.run["workflow_id"], self.run.get("head_branch")
@@ -224,3 +252,33 @@ def poll(gh, repos, tracked, histories):
             errors.append(f"{repo} workflow {workflow_id} history: {e}")
             found[(repo, workflow_id)] = []  # no estimate; tried again after its next run
     return active, ended, gone, found, errors
+
+
+def poll_jobs(gh, runs, known):
+    """The jobs of (repo, run id) pairs, and the runners of their repos when one of those jobs'
+    runners isn't in `known` (repo -> runner name -> labels, None = not allowed to list them):
+    (jobs by run id, the updated `known`, errors)."""
+    jobs, known, errors = {}, dict(known), []
+    for repo, run_id in runs:
+        try:
+            jobs[run_id] = gh.get(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+                                  conditional=True).get("jobs", [])
+        except Exception as e:
+            errors.append(f"{repo} run {run_id} jobs: {e}")
+    for repo in {repo for repo, _ in runs}:
+        names = {j.get("runner_name") for repo_, rid in runs if repo_ == repo
+                 for j in jobs.get(rid, []) if j.get("runner_name")}
+        if repo in known and (known[repo] is None or names <= set(known[repo])):
+            continue
+        try:
+            data = gh.get(f"/repos/{repo}/actions/runners?per_page=100", conditional=True)
+            known[repo] = {r["name"]: [l["name"] for l in r.get("labels", [])]
+                           for r in data.get("runners", [])}
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 404):
+                known[repo] = None  # listing runners needs admin: the jobs' own labels do
+            else:
+                errors.append(f"{repo} runners: {e}")
+        except Exception as e:
+            errors.append(f"{repo} runners: {e}")
+    return jobs, known, errors

@@ -3,7 +3,7 @@ import math, os, sys, threading, time
 
 from gif_overlay.agents_view import Gif
 from gif_overlay.bubble import EDGE
-from gif_overlay.ci import CiTracker, GitHub, describe, median_duration, poll
+from gif_overlay.ci import CiTracker, GitHub, describe, median_duration, poll, poll_jobs, runner_tags
 from gif_overlay.gtkbits import (NEON, Gdk, GLib, Gtk, GtkLayerShell, Pango, PangoCairo, Tween,
                                  cairo, clear_bg, neon_stroke)
 from gif_overlay.helpers import panel_offset
@@ -14,6 +14,7 @@ V_GAP, H_GAP, PAD = 6, 6, 8
 CAPTION_MAX_W = 220  # long branch names get "…"
 STACK_GAP = 10       # between this column and the agents column below it
 BAR_H = 3
+TAG_PAD, TAG_GAP = 4, 3  # the runner tags right of the time: inner padding, between them
 FILL = (0.043, 0.055, 0.078)
 COLORS = {"running": NEON, "queued": NEON, "waiting": NEON, "over": (1.0, 0.66, 0.1),
           "success": (0.2, 1.0, 0.45), "failure": (1.0, 0.24, 0.32), "cancelled": (0.6, 0.65, 0.7)}
@@ -27,6 +28,7 @@ class CiView:
         self.gh = GitHub()
         self.history = {}          # (repo, workflow id) -> successful runs, newest first
         self.stale = set()         # histories to (re)fetch on the next poll
+        self.runners = {}          # repo -> runner name -> labels (None: not allowed to list)
         self.busy = False          # a poll is running on the worker thread
         self.failing = False       # the last poll failed (logged once per streak)
         self.rows, self.win_w, self.win_h = [], 0, 0
@@ -79,11 +81,15 @@ class CiView:
         tracked = [(t.run["repo"], t.run["id"]) for t in self.tracker.runs.values()
                    if t.finished_at is None]
         args = (self.gh, list(self.app.cfg["ci_repos"]), tracked, sorted(self.stale))
+        runners = dict(self.runners)
         self.busy = True
 
         def work():
             try:
                 result = poll(*args)
+                jobs, known, errors = poll_jobs(self.gh, [(r["repo"], r["id"]) for r in result[0]],
+                                                runners)
+                result = result[:4] + (result[4] + errors, jobs, known)
             except Exception as e:  # offline, rate limited, gh logged out...
                 result = e
             GLib.idle_add(self.polled, result)
@@ -112,7 +118,7 @@ class CiView:
         self.failing = bool(errors)
         if isinstance(result, Exception):
             return POLL_IDLE
-        active, ended, gone, found, _errors = result
+        active, ended, gone, found, _errors, jobs, self.runners = result
         self.history.update(found)
         self.stale -= set(found)
         now = time.time()
@@ -124,6 +130,10 @@ class CiView:
                 self.stale.add((run["repo"], run["workflow_id"]))  # one more for the estimate
         for run_id in gone:
             self.tracker.forget(run_id)
+        for run in active:
+            tile = self.tracker.runs.get(run["id"])
+            if tile and run["id"] in jobs:
+                tile.tags = runner_tags(jobs[run["id"]], self.runners.get(run["repo"]), run["repo"])
         for run in active:
             if (run["repo"], run["workflow_id"]) not in self.history:
                 self.stale.add((run["repo"], run["workflow_id"]))
@@ -191,11 +201,13 @@ class CiView:
             caption, timing, fraction, state = describe(t, self.estimate(t.run), now, multi)
             self.rows.append((self.text(caption, "Sans Bold 8", CAPTION_MAX_W),
                               self.text(timing, "Sans 8"),
+                              [self.text(tag, "Sans Bold 7") for tag in t.tags],
                               fraction, state))
         size = cfg["ci_size"]
         self.tile_w = round(size * min(1.8, max(0.6, self.gif.aspect())))
-        self.pill_w = max([max(c.get_pixel_size()[0], s.get_pixel_size()[0])
-                           for c, s, _f, _st in self.rows] + [110]) + 2 * PAD
+        self.pill_w = max([max(c.get_pixel_size()[0],
+                               s.get_pixel_size()[0] + (2 * PAD + tags_width(g) if g else 0))
+                           for c, s, g, _f, _st in self.rows] + [110]) + 2 * PAD
         n = len(self.rows)
         content_w, content_h = self.pill_w + H_GAP + self.tile_w, n * size + (n - 1) * V_GAP
         self.win_w, self.win_h = content_w + 2 * EDGE, content_h + 2 * EDGE
@@ -305,7 +317,7 @@ class CiView:
         cr.set_source_surface(self.layer[1], 0, 0)
         cr.paint()
         h = self.app.cfg["ci_size"]
-        for i, (_c, _s, _f, state) in enumerate(self.rows):
+        for i, (*_x, state) in enumerate(self.rows):
             if state in GLYPHS:
                 continue
             pad = max(2, round(h * 0.08))
@@ -317,7 +329,7 @@ class CiView:
 
     def paint_layer(self, cr):
         a, h = self.fade.value, self.app.cfg["ci_size"]
-        for i, (caption, timing, fraction, state) in enumerate(self.rows):
+        for i, (caption, timing, tags, fraction, state) in enumerate(self.rows):
             color, y = COLORS[state], self.row_y(i)
             # the pill: name, time, progress bar
             px, tx = self.xs()
@@ -333,6 +345,21 @@ class CiView:
             cr.set_source_rgba(*(0.6 + 0.4 * c for c in color), a)
             cr.move_to(px + PAD, top + ch)
             PangoCairo.show_layout(cr, timing)
+            # where it runs: little tags flush with the pill's right edge, on the time's line
+            x = px + self.pill_w - PAD - tags_width(tags)
+            for tag in tags:
+                w, th = tag.get_pixel_size()
+                ty = top + ch + (sh - th) / 2
+                rounded(cr, x, ty - 1, w + 2 * TAG_PAD, th + 2, (th + 2) / 2)
+                cr.set_source_rgba(*color, 0.16 * a)
+                cr.fill_preserve()
+                cr.set_source_rgba(*color, 0.45 * a)
+                cr.set_line_width(1)
+                cr.stroke()
+                cr.set_source_rgba(0.85, 0.92, 0.95, a)
+                cr.move_to(x + TAG_PAD, ty)
+                PangoCairo.show_layout(cr, tag)
+                x += w + 2 * TAG_PAD + TAG_GAP
             if fraction is not None:
                 bx, by, bw = px + PAD, top + ch + sh + 3, self.pill_w - 2 * PAD
                 cr.rectangle(bx, by, bw, BAR_H)
@@ -352,6 +379,10 @@ class CiView:
                 cr.set_source_rgba(*color, a)
                 cr.move_to(tx + (self.tile_w - gw) / 2, y + (h - gh) / 2)
                 PangoCairo.show_layout(cr, glyph)
+
+
+def tags_width(tags):
+    return sum(t.get_pixel_size()[0] + 2 * TAG_PAD for t in tags) + TAG_GAP * max(0, len(tags) - 1)
 
 
 def rounded(cr, x, y, w, h, r):

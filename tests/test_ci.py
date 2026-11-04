@@ -4,7 +4,8 @@ import os, sys, traceback
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import urllib.error
 
-from gif_overlay.ci import CiTracker, describe, median_duration, normalize_repos, parse_time, poll
+from gif_overlay.ci import (CiTracker, describe, median_duration, normalize_repos, parse_time, poll,
+                            poll_jobs, runner_tags)
 
 T0 = parse_time("2026-11-03T12:00:00Z")
 
@@ -158,6 +159,66 @@ def test_normalize_repos():
     assert normalize_repos("o/r") == ["o/r"]
     assert normalize_repos(["https://github.com/o/r.git", "o/r", " x/y ", "nope", 3]) == ["o/r", "x/y"]
     assert normalize_repos(None) == [] and normalize_repos(5) == []
+
+
+# ---------------------------------------------------------------- where it runs
+RUNNERS = {"pc-lucho-1": ["self-hosted", "Linux", "X64", "ever-panel", "pesado", "pc"],
+           "truenas-casa-3": ["self-hosted", "Linux", "X64", "ever-panel", "pesado", "casa"],
+           "truenas-ever-panel": ["self-hosted", "Linux", "X64", "ever-panel", "oficina", "liviano"]}
+
+def job(status, runner=None, labels=("self-hosted", "ever-panel", "pesado")):
+    return {"status": status, "runner_name": runner, "labels": list(labels)}
+
+def test_tags_where_then_kind_from_running_jobs():
+    jobs = [job("in_progress", "pc-lucho-1"), job("in_progress", "truenas-casa-3"),
+            job("completed", "truenas-ever-panel", ("self-hosted", "liviano")), job("queued")]
+    assert runner_tags(jobs, RUNNERS, "me/ever-panel") == ["pc", "casa", "pesado"]
+
+def test_tags_queued_only_shows_the_requested_kind():
+    assert runner_tags([job("queued")], RUNNERS, "me/ever-panel") == ["pesado"]
+
+def test_tags_finished_run_keeps_where_it_ran():
+    jobs = [job("completed", "truenas-ever-panel", ("self-hosted", "liviano"))]
+    assert runner_tags(jobs, RUNNERS, "me/ever-panel") == ["oficina", "liviano"]
+
+def test_tags_without_runner_list_use_requested_labels():
+    jobs = [job("in_progress", "pc-lucho-1", ("self-hosted", "Linux", "ever-panel", "casa", "liviano"))]
+    assert runner_tags(jobs, None, "me/ever-panel") == ["casa", "liviano"]  # repo-named label dropped
+    hosted = [job("in_progress", "GitHub Actions 3", ("ubuntu-latest",))]
+    assert runner_tags(hosted, RUNNERS, "me/ever-panel") == ["ubuntu-latest"]
+    assert runner_tags([], RUNNERS, "me/ever-panel") == []
+
+class JobsGitHub:
+    def __init__(self, runners_code=None):
+        self.runners_code, self.calls = runners_code, []
+
+    def get(self, path, conditional=False):
+        self.calls.append(path)
+        if "/runners" in path:
+            if self.runners_code:
+                raise urllib.error.HTTPError(path, self.runners_code, "no", {}, None)
+            return {"runners": [{"name": n, "labels": [{"name": l} for l in ls]}
+                                for n, ls in RUNNERS.items()]}
+        if "/runs/5/" in path:
+            raise urllib.error.HTTPError(path, 500, "boom", {}, None)
+        return {"jobs": [job("in_progress", "pc-lucho-1")]}
+
+def test_poll_jobs_fetches_runners_once():
+    gh = JobsGitHub()
+    jobs, runners, errors = poll_jobs(gh, [("o/r", 1), ("o/r", 5)], {})
+    assert list(jobs) == [1] and len(errors) == 1  # run 5's jobs failed: only its part lost
+    assert runners == {"o/r": RUNNERS}
+    gh.calls.clear()
+    poll_jobs(gh, [("o/r", 1)], runners)
+    assert not any("/runners" in c for c in gh.calls)  # every runner known: not fetched again
+
+def test_poll_jobs_no_access_to_runners_is_not_an_error():
+    gh = JobsGitHub(runners_code=403)
+    jobs, runners, errors = poll_jobs(gh, [("o/r", 1)], {})
+    assert runners == {"o/r": None} and errors == [] and list(jobs) == [1]
+    gh.calls.clear()
+    poll_jobs(gh, [("o/r", 1)], runners)
+    assert not any("/runners" in c for c in gh.calls)
 
 
 # ---------------------------------------------------------------- texts
