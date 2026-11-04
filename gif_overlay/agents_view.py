@@ -3,6 +3,7 @@ import glob, json, math, os, re, sys, time
 
 from gif_overlay.agents import (INDENT, AgentTracker, forest, format_elapsed, gif_for_level,
                                 layout, level_gifs)
+from gif_overlay.helpers import panel_offset
 from gif_overlay.bubble import EDGE, TAIL_H, bubble_box, bubble_layouts, paint_bubble
 from gif_overlay.gtkbits import (Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell, Pango,
                                  PangoCairo, Tween, cairo, clear_bg, neon_stroke)
@@ -18,6 +19,8 @@ BADGE_OVERHANG = 8  # timer badges stick out of the tile corner by this much
 SMALL_TILE = 36     # tiles smaller than this get their badge beside them
 BADGE_SIDE_W = 44   # room for a badge beside a small tile
 LOCAL_ID = re.compile(r"local_[0-9a-f-]+")
+
+STACK_GAP = 10  # between the CI runs and this column when they share a corner
 
 
 
@@ -78,7 +81,7 @@ class AgentsView:
         self.app = app             # the gif_overlay.app module: cfg, monitor_geometry()...
         self.tracker = AgentTracker()
         self.save_src = None
-        self.win_w = 0
+        self.win_w = self.win_h = 0
         self.load_state()          # sessions seen before a restart, timers and all
         self.levels = {}           # level -> GIF path (level 1 = Claude sessions)
         self.gifs = {}             # path -> Gif, loaded on first use
@@ -97,9 +100,13 @@ class AgentsView:
         GtkLayerShell.init_for_window(self.win)
         GtkLayerShell.set_namespace(self.win, "gif-overlay-agents")
         GtkLayerShell.set_layer(self.win, GtkLayerShell.Layer.OVERLAY)
-        GtkLayerShell.set_anchor(self.win, GtkLayerShell.Edge.TOP, True)
-        # top-right: the column is mirrored (hugs the right edge, bubbles open to the left)
-        self.mirror = app.cfg["agents_corner"] == "top-right"
+        # a right corner: the column is mirrored (hugs the right edge, bubbles open to the left)
+        corner = app.cfg["agents_corner"]
+        self.mirror, self.bottom = corner.endswith("right"), corner.startswith("bottom")
+        self.v_edge = GtkLayerShell.Edge.BOTTOM if self.bottom else GtkLayerShell.Edge.TOP
+        GtkLayerShell.set_anchor(self.win, self.v_edge, True)
+        self.stacked = None  # (shown, height) the CI runs were last moved for
+        app.place_listeners.append(self.restack)  # above the GIF / a panel at the bottom
         self.monitor, self.warned_monitor = None, False  # the monitor it's shown on
         self.side_edge = GtkLayerShell.Edge.RIGHT if self.mirror else GtkLayerShell.Edge.LEFT
         GtkLayerShell.set_anchor(self.win, self.side_edge, True)
@@ -304,16 +311,17 @@ class AgentsView:
         if self.mirror:  # flip positions (not the pictures): x measured from the right
             self.placements = [p._replace(x=content_w - p.x - p.w) for p in self.placements]
         w, h = content_w + 2 * EDGE, h + 2 * EDGE + BADGE_OVERHANG
-        self.win_w = w
+        self.win_w, self.win_h = w, h
         self.area.set_size_request(w, h)
         self.win.resize(w, h)
         if not self.win.get_visible():
             self.monitor = mon = self.pick_monitor()
             if mon:
                 GtkLayerShell.set_monitor(self.win, mon)
-            GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, self.top_margin())
+            GtkLayerShell.set_margin(self.win, self.v_edge, self.vertical_margin())
             GtkLayerShell.set_margin(self.win, self.side_edge, self.app.cfg["margin"])
             self.win.show_all()
+        self.restack_ci()
         region = cairo.Region()
         for p in self.placements:
             if p.kind == "bubble":  # only bubbles take clicks; sprites are click-through
@@ -327,6 +335,7 @@ class AgentsView:
         for g in self.gifs.values():
             g.stop()
         self.win.hide()
+        self.restack_ci()
 
     def on_monitors_changed(self, *_):
         if self.win.get_visible():  # show it again on the right monitor
@@ -354,15 +363,36 @@ class AgentsView:
             return g.x, g.y, g.width, g.height
         return self.app.monitor_geometry()
 
-    def top_margin(self):
-        """Below the CI runs when they share this corner."""
-        ci = getattr(self.app, "ci", None)
-        corner = "top-right" if self.mirror else "top-left"
-        return self.app.cfg["margin"] + (ci.stack_height(corner, self.geometry())
-                                         if ci else 0)
+    def corner(self):
+        return ("bottom-" if self.bottom else "top-") + ("right" if self.mirror else "left")
+
+    def vertical_margin(self):
+        """Distance from the top (below the CI runs when they share this corner), or from the
+        bottom: above any panel there, and above the GIF when sharing its corner."""
+        cfg = self.app.cfg
+        if not self.bottom:
+            ci = getattr(self.app, "ci", None)
+            return cfg["margin"] + (ci.stack_height(self.corner(), self.geometry()) if ci else 0)
+        if self.mirror and self.geometry() == self.app.monitor_geometry():
+            return self.app.bottom_margin() + self.app.size()[1] + 6
+        return cfg["margin"] + panel_offset(self.app.panels, self.geometry())
 
     def restack(self):
-        GtkLayerShell.set_margin(self.win, GtkLayerShell.Edge.TOP, self.top_margin())
+        GtkLayerShell.set_margin(self.win, self.v_edge, self.vertical_margin())
+
+    # -- sharing a bottom corner with the CI runs: they go right above this column
+    def stack_height(self, corner, geometry):
+        """How far a column in that corner of that monitor must move up to clear this one."""
+        if not self.placements or self.corner() != corner or self.geometry() != geometry:
+            return 0
+        return self.win_h - 2 * EDGE + STACK_GAP
+
+    def restack_ci(self):
+        shown = (bool(self.placements), self.win_h)
+        ci = getattr(self.app, "ci", None)
+        if shown != self.stacked and ci:
+            self.stacked = shown
+            ci.place()
 
     # -- hover: the whole column (gaps included) is one area, everything fades together
     def rects(self):
@@ -370,12 +400,14 @@ class AgentsView:
         boxes = [p for p in self.placements if p.kind != "bubble"]
         if not boxes:
             return []
-        mx, my, mw, _ = self.geometry()
+        mx, my, mw, mh = self.geometry()
         m = self.app.cfg["margin"]
         left = mx + mw - m - self.win_w if self.mirror else mx + m  # the window's left edge
         x0, x1 = min(p.x for p in boxes), max(p.x + p.w for p in boxes)
         h = max(p.y + p.h for p in boxes)
-        return [f"agents:{left + EDGE + x0},{my + self.top_margin() + EDGE},{x1 - x0},{h}"]
+        v = self.vertical_margin()
+        top = my + mh - v - self.win_h if self.bottom else my + v  # the window's top edge
+        return [f"agents:{left + EDGE + x0},{top + EDGE},{x1 - x0},{h}"]
 
     def hover(self, _name, on):
         self.fade.to(self.app.cfg["hover_opacity"] if on else 1.0)

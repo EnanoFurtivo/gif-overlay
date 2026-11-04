@@ -2,7 +2,7 @@
 import math, os, sys, threading, time
 
 from gif_overlay.agents import INDENT
-from gif_overlay.agents_view import Gif
+from gif_overlay.agents_view import STACK_GAP, Gif
 from gif_overlay.bubble import EDGE
 from gif_overlay.ci import (ESTIMATE_RUNS, CiTracker, GitHub, describe, describe_job, job_estimate,
                             median_duration, poll, poll_jobs, runner_tags, shown_jobs)
@@ -16,7 +16,6 @@ V_GAP, H_GAP, PAD = 6, 6, 8  # V_GAP: between one run (with its jobs) and the ne
 JOB_GAP, JOB_RATIO = 3, 0.7   # a job row: under its run, 70% of its height
 CAPTION_MAX_W = 220  # long branch names get "…"
 JOB_NAME_MAX_W = 170
-STACK_GAP = 10       # between this column and the agents column below it
 BAR_H = 3
 TAG_PAD, TAG_GAP = 4, 3  # the runner tags right of the time: inner padding, between them
 FILL = (0.043, 0.055, 0.078)
@@ -293,13 +292,14 @@ class CiView:
 
     def vertical_margin(self):
         """Distance from the top, or from the bottom: above any panel there (riding with an
-        auto-hide one), and above the GIF when sharing its corner."""
+        auto-hide one), above the GIF when sharing its corner and above the agents column."""
         if self.top:
             return self.app.cfg["margin"]
+        below = self.app.agents.stack_height(self.app.cfg["ci_corner"], self.geometry())
         if not self.left and (self.monitor is None
                               or self.geometry() == self.app.monitor_geometry()):
-            return self.app.bottom_margin() + self.app.size()[1] + V_GAP
-        return self.app.cfg["margin"] + panel_offset(self.app.panels, self.geometry())
+            return self.app.bottom_margin() + self.app.size()[1] + V_GAP + below
+        return self.app.cfg["margin"] + panel_offset(self.app.panels, self.geometry()) + below
 
     def place(self):
         GtkLayerShell.set_margin(self.win, self.h_edge, self.app.cfg["margin"])

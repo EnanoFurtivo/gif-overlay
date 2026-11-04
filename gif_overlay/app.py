@@ -80,7 +80,7 @@ p.add_argument("--agents", action=argparse.BooleanOptionalAction,
                help="a sprite per running Claude agent in the top-left corner")
 p.add_argument("--agents-monitor",
                help="monitor for the agents column, like --monitor (default: the GIF's)")
-p.add_argument("--agents-corner", choices=["top-right", "top-left"],
+p.add_argument("--agents-corner", choices=["top-right", "top-left", "bottom-right", "bottom-left"],
                help="where the agent sprites live (default top-right)")
 p.add_argument("--agent-size", type=int, help="height of a Claude session's sprite (px, default 54)")
 p.add_argument("--gifs-dir", help="folder the agent sprites are picked from (default ~/gifs)")
@@ -426,6 +426,7 @@ def on_bus_call(_conn, _sender, _path, _iface, method, params, invocation):
         elif method == "Panels":
             panels[:] = parse_panels(params.unpack()[0])
             update_dock()
+            agents.restack()
             ci.place()
         elif method == "AgentEvent":
             agents.event(params.unpack()[0])

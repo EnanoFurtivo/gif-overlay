@@ -70,7 +70,7 @@ runs again on that branch. It's click-through and fades on hover like the rest.
 It uses your `gh` login (`gh auth token`) and polls every 10 s while something runs, every
 30 s otherwise; unchanged answers are ETag hits, which don't count against the rate limit.
 `--ci-size` sets the tile height (default 44), `--no-ci` turns it off.
-In the agents' corner (`--ci-corner top-right`), the agents column moves down below it.
+In the agents' corner (same monitor and `--ci-corner` as `--agents-corner`) the runs stay above the agents: at the top the agents column moves down below them, at the bottom the runs move up above it.
 
 ## Requirements
 
@@ -119,7 +119,7 @@ Meta+Alt+PgUp / Meta+Alt+PgDown / Meta+Alt+H.
 | `--bubbles` / `--no-bubbles` | on | notifications as speech bubbles, or keep Plasma's popups |
 | `--agents` / `--no-agents` | on | Claude agent sprites in the top-left corner |
 | `--agents-monitor` | the GIF's | monitor for the agents column, like `--monitor` |
-| `--agents-corner` | top-right | `top-right` or `top-left` |
+| `--agents-corner` | top-right | `top-right`, `top-left`, `bottom-right` or `bottom-left` |
 | `--agent-size` | 54 | height of a session's sprite (px) |
 | `--gifs-dir` | `~/gifs` | where `level1.gif`, `level2.gif`… live |
 | `--sound` | `~/.local/share/gif-overlay/sounds/notification.wav` | played with every bubble (`none` = silent) |
